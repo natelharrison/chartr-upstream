@@ -14,6 +14,7 @@ use theme::{Appearance, GlobalTheme, SystemAppearance, Theme, ThemeRegistry};
 pub const SETTINGS_FILE: &str = "settings.toml";
 pub const DEFAULT_DARK_THEME: &str = "chartr Dark";
 pub const DEFAULT_LIGHT_THEME: &str = "chartr Light";
+pub const CHARTRX_THEME: &str = "chartrx";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SettingsPage {
@@ -63,6 +64,17 @@ pub enum ThemeMode {
     System,
 }
 
+/// How the work surface meets the window chrome.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkSurface {
+    /// A bordered card inset from the window edges.
+    #[default]
+    Inset,
+    /// Edge to edge, divided from the title bar and sidebar only.
+    Full,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedSettings {
     pub terminate_sessions_on_exit: bool,
@@ -71,6 +83,7 @@ pub struct ResolvedSettings {
     pub show_view_mode_picker: bool,
     pub show_status_bar: bool,
     pub reduce_motion: bool,
+    pub work_surface: WorkSurface,
     pub theme_mode: ThemeMode,
     pub fixed_theme: String,
     pub light_theme: String,
@@ -92,11 +105,12 @@ impl Default for ResolvedSettings {
             show_view_mode_picker: true,
             show_status_bar: false,
             reduce_motion: false,
+            work_surface: WorkSurface::Inset,
             theme_mode: ThemeMode::Fixed,
             fixed_theme: DEFAULT_DARK_THEME.to_owned(),
             light_theme: DEFAULT_LIGHT_THEME.to_owned(),
             dark_theme: DEFAULT_DARK_THEME.to_owned(),
-            ui_font_family: "Geist".to_owned(),
+            ui_font_family: "System UI".to_owned(),
             ui_font_size: 14.,
             terminal_font_family: "IBM Plex Mono".to_owned(),
             terminal_font_size: 13.,
@@ -166,6 +180,8 @@ pub struct AppearanceContent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reduce_motion: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_surface: Option<WorkSurface>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub theme_mode: Option<ThemeMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fixed_theme: Option<String>,
@@ -218,6 +234,9 @@ impl SettingsContent {
             reduce_motion: appearance
                 .and_then(|content| content.reduce_motion)
                 .unwrap_or(defaults.reduce_motion),
+            work_surface: appearance
+                .and_then(|content| content.work_surface)
+                .unwrap_or(defaults.work_surface),
             theme_mode: appearance
                 .and_then(|content| content.theme_mode)
                 .unwrap_or(defaults.theme_mode),
@@ -387,7 +406,8 @@ pub fn init_themes(settings: &ResolvedSettings, cx: &mut gpui::App) {
     if let Some(source) = dark_source {
         let dark = chartr_dark(&source);
         let light = chartr_light(&dark);
-        registry.insert_themes([dark, light]);
+        let chartrx = chartrx(&source);
+        registry.insert_themes([dark, light, chartrx]);
     }
     apply_theme(settings, cx);
 }
@@ -830,7 +850,7 @@ fn catalog_theme(source: &Theme, palette: ThemePalette) -> Theme {
     let terminal_foreground = color(palette.terminal_foreground);
 
     let colors = &mut theme.styles.colors;
-    colors.background = surface;
+    colors.background = recessed_canvas(surface, palette.appearance);
     colors.surface_background = sidebar;
     // Context menus use `ghost_element_hover` for their rows. Several palettes
     // intentionally give cards and hovered rows the same color, so using
@@ -906,6 +926,16 @@ fn catalog_theme(source: &Theme, palette: ThemePalette) -> Theme {
     theme
 }
 
+/// The canvas around the workspace, a step darker than its surface so the
+/// workspace reads as a raised panel, as chartrx does.
+fn recessed_canvas(surface: Hsla, appearance: Appearance) -> Hsla {
+    let step = match appearance {
+        Appearance::Dark => 0.03,
+        Appearance::Light => 0.04,
+    };
+    Hsla { l: (surface.l - step).max(0.), ..surface }
+}
+
 fn chartr_dark(source: &Theme) -> Theme {
     let mut dark = source.clone();
     dark.id = "chartr_dark".to_owned();
@@ -928,7 +958,98 @@ fn chartr_dark(source: &Theme) -> Theme {
     colors.pane_group_border = border;
     colors.panel_indent_guide = border_variant;
     colors.scrollbar_track_border = border_variant;
+    colors.background = recessed_canvas(colors.editor_background, Appearance::Dark);
     dark
+}
+
+/// The space-pane-tabs mockup palette: a cool blue-grey canvas with a lighter
+/// inset surface, so the workspace reads as a raised panel. Terminal ANSI
+/// colors stay One Dark's.
+fn chartrx(source: &Theme) -> Theme {
+    let mut theme = source.clone();
+    theme.id = "chartrx".to_owned();
+    theme.name = CHARTRX_THEME.into();
+    theme.appearance = Appearance::Dark;
+
+    let color = |value| gpui::rgb(value).into();
+    let canvas = color(0x1d2129);
+    let surface = color(0x252a34);
+    let bar = color(0x222730);
+    let menu = color(0x1d2229);
+    let hover = color(0x2b303a);
+    let selected = color(0x313946);
+    let border = color(0x48515f);
+    let border_variant = color(0x353c48);
+    let text = color(0xe1e5eb);
+    let muted = color(0x9ca6b4);
+    let quiet = color(0x7f8a99);
+    let accent = color(0x82b7ff);
+    let teal = color(0x91d4ca);
+    let amber = color(0xe9c46a);
+
+    let colors = &mut theme.styles.colors;
+    colors.background = canvas;
+    colors.surface_background = canvas;
+    colors.elevated_surface_background = menu;
+    colors.element_background = bar;
+    colors.element_hover = hover;
+    colors.element_active = selected;
+    colors.element_selected = selected;
+    colors.element_selection_background = selected;
+    colors.ghost_element_hover = hover;
+    colors.ghost_element_active = selected;
+    colors.ghost_element_selected = selected;
+    colors.drop_target_background = selected;
+    colors.drop_target_border = accent;
+    colors.border = border;
+    colors.border_variant = border_variant;
+    colors.border_focused = accent;
+    colors.border_selected = accent;
+    colors.text = text;
+    colors.text_muted = muted;
+    colors.text_placeholder = quiet;
+    colors.text_disabled = quiet;
+    colors.text_accent = text;
+    colors.icon = text;
+    colors.icon_muted = muted;
+    colors.icon_placeholder = muted;
+    colors.icon_disabled = quiet;
+    colors.icon_accent = text;
+    colors.title_bar_background = canvas;
+    colors.title_bar_inactive_background = canvas;
+    colors.toolbar_background = bar;
+    colors.tab_bar_background = bar;
+    colors.tab_inactive_background = bar;
+    colors.tab_active_background = surface;
+    colors.panel_background = surface;
+    colors.panel_focused_border = accent;
+    colors.panel_indent_guide = border_variant;
+    colors.panel_indent_guide_active = accent;
+    colors.pane_group_border = border;
+    colors.scrollbar_track_border = border_variant;
+    colors.editor_background = surface;
+    colors.editor_foreground = text;
+    colors.editor_gutter_background = surface;
+    colors.editor_subheader_background = bar;
+    colors.terminal_background = surface;
+    colors.terminal_ansi_background = surface;
+    colors.terminal_foreground = text;
+    colors.terminal_bright_foreground = text;
+    colors.terminal_dim_foreground = muted;
+    colors.link_text_hover = accent;
+    colors.version_control_added = teal;
+    colors.version_control_modified = amber;
+
+    let status = &mut theme.styles.status;
+    status.success = teal;
+    status.success_border = teal;
+    status.warning = amber;
+    status.warning_border = amber;
+    status.info = accent;
+    status.info_border = accent;
+    status.hidden = quiet;
+    status.ignored = quiet;
+    theme
 }
 
 fn chartr_light(dark: &Theme) -> Theme {
@@ -1077,6 +1198,10 @@ mod tests {
             }
             assert_eq!(registry.get(DEFAULT_DARK_THEME).unwrap().appearance, Appearance::Dark);
             assert_eq!(registry.get(DEFAULT_LIGHT_THEME).unwrap().appearance, Appearance::Light);
+            let chartrx = registry.get(CHARTRX_THEME).unwrap();
+            assert_eq!(chartrx.appearance, Appearance::Dark);
+            assert_eq!(chartrx.styles.colors.background, gpui::rgb(0x1d2129).into());
+            assert_eq!(chartrx.styles.colors.editor_background, gpui::rgb(0x252a34).into());
         });
     }
 
@@ -1101,15 +1226,36 @@ mod tests {
             init_themes(&ResolvedSettings::default(), cx);
             let registry = ThemeRegistry::global(cx);
 
-            for name in THEME_PALETTES
-                .map(|palette| palette.name)
-                .into_iter()
-                .chain([DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME])
-            {
+            for name in THEME_PALETTES.map(|palette| palette.name).into_iter().chain([
+                DEFAULT_DARK_THEME,
+                DEFAULT_LIGHT_THEME,
+                CHARTRX_THEME,
+            ]) {
                 let theme = registry.get(name).unwrap();
                 let colors = &theme.styles.colors;
                 assert_eq!(colors.text_accent, colors.text, "{name} has tinted active text");
                 assert_eq!(colors.icon_accent, colors.icon, "{name} has tinted active icons");
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn the_canvas_sits_darker_than_the_workspace_in_every_theme(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            theme::init(theme::LoadThemes::JustBase, cx);
+            init_themes(&ResolvedSettings::default(), cx);
+            let registry = ThemeRegistry::global(cx);
+
+            for name in THEME_PALETTES.map(|palette| palette.name).into_iter().chain([
+                DEFAULT_DARK_THEME,
+                DEFAULT_LIGHT_THEME,
+                CHARTRX_THEME,
+            ]) {
+                let colors = &registry.get(name).unwrap().styles.colors;
+                assert!(
+                    colors.background.l < colors.editor_background.l,
+                    "{name} has a flat canvas"
+                );
             }
         });
     }
@@ -1135,10 +1281,11 @@ mod tests {
         .unwrap();
         let resolved = content.resolve();
         assert_eq!(resolved.ui_font_size, 16.);
-        assert_eq!(resolved.ui_font_family, "Geist");
+        assert_eq!(resolved.ui_font_family, "System UI");
         assert_eq!(resolved.terminal_font_family, "Monaspace Neon");
         assert_eq!(resolved.fixed_theme, DEFAULT_DARK_THEME);
         assert!(!resolved.reduce_motion);
+        assert_eq!(resolved.work_surface, WorkSurface::Inset);
         assert!(!resolved.show_status_bar);
         assert!(resolved.middle_click_closes_tab);
         assert!(resolved.middle_click_closes_sidebar_tab);
@@ -1153,6 +1300,7 @@ mod tests {
             .update(|content| {
                 content.terminal.get_or_insert_default().font_size = Some(17.);
                 content.appearance.get_or_insert_default().reduce_motion = Some(true);
+                content.appearance.get_or_insert_default().work_surface = Some(WorkSurface::Full);
                 let general = content.general.get_or_insert_default();
                 general.show_status_bar = Some(true);
                 general.middle_click_closes_tab = Some(true);
@@ -1162,6 +1310,7 @@ mod tests {
         let relaunched = SettingsStore::load(&file);
         assert_eq!(relaunched.resolved().terminal_font_size, 17.);
         assert!(relaunched.resolved().reduce_motion);
+        assert_eq!(relaunched.resolved().work_surface, WorkSurface::Full);
         assert!(relaunched.resolved().show_status_bar);
         assert!(relaunched.resolved().middle_click_closes_tab);
         assert!(relaunched.resolved().middle_click_closes_sidebar_tab);

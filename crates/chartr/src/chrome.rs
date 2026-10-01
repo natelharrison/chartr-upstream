@@ -19,12 +19,17 @@ use crate::{
     workspace::{ItemId, PaneId, WorkspaceTabId},
 };
 use chartr_herdr::control::SessionStatus;
-use gpui::{ElementId, EntityId, Pixels, Role, SharedString, Stateful, transparent_black};
+use gpui::{ElementId, EntityId, Pixels, Role, SharedString, Stateful};
 use ui::{ButtonLike, CommonAnimationExt, IconButton, Tab, TabPosition, Tooltip, prelude::*};
 
 use crate::assets::PLUGIN_LAUNCHER_ICON_PATH;
 
 const TAB_LABEL_MIN_WIDTH: f32 = 36.;
+const STRIP_TAB_MAX_WIDTH: f32 = 200.;
+/// Pane bars are one height whether or not they hold tabs.
+pub(crate) const PANE_BAR_HEIGHT: f32 = 33.;
+const PANE_TAB_PADDING: f32 = 11.;
+const PANE_TAB_GAP: f32 = 8.;
 
 pub(crate) fn new_item_button(id: impl Into<ElementId>) -> IconButton {
     IconButton::new(id, IconName::Plus).icon_size(IconSize::Small)
@@ -144,21 +149,71 @@ pub(crate) fn new_item_cell(button: impl IntoElement, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
+/// A quiet pane bar: it shares the pane's background, and only a soft line
+/// separates it from the content.
+pub(crate) fn pane_bar(id: impl Into<ElementId>, cx: &App) -> Stateful<Div> {
+    let colors = cx.theme().colors();
+    h_flex()
+        .id(id)
+        .w_full()
+        .h(px(PANE_BAR_HEIGHT))
+        .flex_none()
+        .overflow_hidden()
+        .bg(colors.editor_background)
+        .border_b_1()
+        .border_color(colors.border_variant)
+}
+
+/// A single selected pane tab for views that show one item, such as an open
+/// chat: the same icon, spacing and accent underline as `ItemTab::build`.
+pub(crate) fn single_pane_tab(
+    id: impl Into<ElementId>,
+    icon_path: SharedString,
+    title: impl Into<SharedString>,
+    cx: &App,
+) -> impl IntoElement {
+    h_flex()
+        .id(id)
+        .relative()
+        .role(Role::Tab)
+        .aria_selected(true)
+        .flex_none()
+        .max_w(px(320.))
+        .h(px(PANE_BAR_HEIGHT))
+        .px(px(PANE_TAB_PADDING))
+        .gap(px(PANE_TAB_GAP))
+        .child(
+            Icon::from_path(icon_path.clone())
+                .size(IconSize::XSmall)
+                .color(crate::agent_icons::icon_color(&icon_path)),
+        )
+        .child(Label::new(title.into()).size(UI_LABEL_DEFAULT).single_line().truncate())
+        .child(
+            div()
+                .absolute()
+                .left(px(8.))
+                .right(px(8.))
+                .bottom_0()
+                .h(px(2.))
+                .rounded(px(2.))
+                .bg(cx.theme().colors().border_focused),
+        )
+}
+
 /// Clip the full title and paint a fade only when it reaches the trailing edge.
 /// Close controls overlay the title, so hovering never changes text geometry.
 fn tab_label(
     title: SharedString,
-    selected: bool,
+    fit: bool,
     color: Color,
     background: gpui::Hsla,
     hover_background: gpui::Hsla,
     close_slot: Option<AnyElement>,
+    show_close: bool,
 ) -> impl IntoElement {
     let text_right = Rc::new(Cell::new(px(0.)));
     let measured_right = text_right.clone();
-    let closable = close_slot.is_some();
     let fade = move |hovered: bool| {
-        let expanded = hovered && closable;
         let text_right = text_right.clone();
         let background = if hovered { hover_background } else { background };
         div()
@@ -166,7 +221,7 @@ fn tab_label(
             .right_0()
             .top_0()
             .h_full()
-            .w(px(if expanded { 48. } else { 20. }))
+            .w(px(20.))
             .map(|fade| {
                 if hovered {
                     fade.invisible().group_hover("", |fade| fade.visible())
@@ -178,16 +233,12 @@ fn tab_label(
                 gpui::canvas(
                     |_, _, _| {},
                     move |bounds, _, window, _| {
-                        let reserved = if expanded { px(18.) } else { px(0.) };
-                        if text_right.get() > bounds.right() - reserved {
+                        if text_right.get() > bounds.right() {
                             window.paint_quad(gpui::fill(
                                 bounds,
                                 gpui::linear_gradient(
                                     90.,
-                                    gpui::linear_color_stop(
-                                        background,
-                                        if expanded { 0.6 } else { 1. },
-                                    ),
+                                    gpui::linear_color_stop(background, 1.),
                                     gpui::linear_color_stop(background.opacity(0.), 0.),
                                 ),
                             ));
@@ -197,13 +248,12 @@ fn tab_label(
                 .size_full(),
             )
     };
-    h_flex()
+    let label = h_flex()
         .relative()
-        .flex_1()
+        .map(|label| if fit { label.flex_auto() } else { label.flex_1() })
         .min_w_0()
         .min_h(px(14.))
         .overflow_hidden()
-        .when(selected, |label| label.pr_px())
         .child(
             div()
                 .flex_none()
@@ -215,22 +265,30 @@ fn tab_label(
                 .child(Label::new(title).size(UI_LABEL_DEFAULT).color(color).single_line()),
         )
         .child(fade(false))
-        .child(fade(true))
-        .when_some(close_slot, |label, close| {
-            label.child(
+        .child(fade(true));
+    // The close button has its own slot after the title so it never covers
+    // the name; the slot is always reserved so hovering does not move text.
+    h_flex()
+        // Strip tabs size to their title; pane tabs share the bar's width.
+        .map(|row| if fit { row.flex_auto() } else { row.flex_1() })
+        .min_w_0()
+        .gap(px(4.))
+        .child(label)
+        .when_some(close_slot, |row, close| {
+            row.child(
                 h_flex()
-                    .absolute()
-                    .right_0()
+                    .flex_none()
                     .size(px(14.))
                     .justify_center()
-                    .invisible()
-                    .group_hover("", |button| button.visible())
+                    .when(!show_close, |slot| {
+                        slot.invisible().group_hover("", |slot| slot.visible())
+                    })
                     .child(close),
             )
         })
 }
 
-/// Resolve the Zed border shape shared by outer and pane-local tab strips.
+/// Resolve the Zed border shape shared by pane-local tab strips.
 pub(crate) fn tab_position(index: usize, count: usize, active_index: Option<usize>) -> TabPosition {
     if index == 0 {
         TabPosition::First
@@ -252,7 +310,6 @@ pub(crate) struct ItemTab<'a> {
     title: SharedString,
     aria_label: SharedString,
     selected: bool,
-    position: TabPosition,
     activity: Activity,
     icon_path: Option<SharedString>,
     grouped: bool,
@@ -263,18 +320,22 @@ pub(crate) struct ItemTab<'a> {
 
 impl<'a> ItemTab<'a> {
     pub(crate) fn min_width(rounded: bool, cx: &App) -> Pixels {
-        // Minimum 36px label, 12px icon, 14px close slot, padding, gaps,
-        // and borders (including the selected pane tab's compensation pixel).
-        px(TAB_LABEL_MIN_WIDTH + 12. + 14. + 2.)
-            + DynamicSpacing::Base06.px(cx) * if rounded { 2. } else { 1. }
-            + DynamicSpacing::Base04.px(cx) * if rounded { 2. } else { 3. }
+        // Minimum 36px label, 16px status tile, 14px close slot, padding, and gaps.
+        if rounded {
+            px(TAB_LABEL_MIN_WIDTH + 16. + 14. + 2.)
+                + DynamicSpacing::Base06.px(cx) * 2.
+                + DynamicSpacing::Base04.px(cx) * 2.
+        } else {
+            px(TAB_LABEL_MIN_WIDTH + 16. + 14. + 2.)
+                + DynamicSpacing::Base06.px(cx)
+                + DynamicSpacing::Base04.px(cx) * 3.
+        }
     }
 
     pub(crate) fn new(
         id: impl Into<ElementId>,
         title: impl Into<SharedString>,
         selected: bool,
-        position: TabPosition,
         space: &'a str,
         key: ItemId,
     ) -> Self {
@@ -284,7 +345,6 @@ impl<'a> ItemTab<'a> {
             aria_label: title.clone(),
             title,
             selected,
-            position,
             activity: Activity::default(),
             icon_path: None,
             grouped: false,
@@ -327,12 +387,15 @@ impl<'a> ItemTab<'a> {
             } else {
                 colors.tab_inactive_background
             });
+        // Other tabs take the shared hover tint; the current tab keeps the pane's color.
+        let hover_background = background.blend(crate::design::hover_tint(cx));
+        let selected = self.selected;
         Tab::new(self.id)
+            .when(!selected, |tab| tab.hover(move |style| style.bg(hover_background)))
             .fill_width()
             .role(Role::Tab)
             .aria_label(self.aria_label)
             .aria_selected(self.selected)
-            .position(self.position)
             .toggle_state(self.selected)
             .start_slot(item_indicator(
                 self.activity,
@@ -344,30 +407,22 @@ impl<'a> ItemTab<'a> {
             ))
             .child(tab_label(
                 self.title,
-                self.selected,
+                false,
                 Color::Default,
                 background,
-                background,
+                if selected { background } else { hover_background },
                 self.close_slot,
+                self.selected,
             ))
     }
 
-    /// Inset, rounded variant for the outer strip in Tabbed mode only.
-    /// Keep the same slots and semantics as pane tabs, with a constant border
-    /// and label width so selection never shifts neighboring tabs.
+    /// Compact layout tab for the Tabs strip: sized to its title, with a faint
+    /// fill for the selected or hovered tab and no outline.
     pub(crate) fn build_rounded(self, hovered: bool, cx: &App) -> Stateful<Div> {
         let colors = cx.theme().colors();
-        let panel_background = colors.background.blend(colors.panel_background);
-        let background = if self.selected {
-            panel_background.blend(colors.ghost_element_selected)
-        } else {
-            panel_background
-        };
-        let hover_background = if self.selected {
-            background
-        } else {
-            panel_background.blend(colors.ghost_element_hover)
-        };
+        let fill = colors.text.opacity(0.05);
+        let filled = colors.background.blend(fill);
+        let lit = self.selected || hovered;
         h_flex()
             .id(self.id)
             .group("")
@@ -375,44 +430,31 @@ impl<'a> ItemTab<'a> {
             .aria_label(self.aria_label)
             .aria_selected(self.selected)
             .flex_none()
-            .w_full()
-            .h(Tab::container_height(cx) - px(2.))
-            .px(DynamicSpacing::Base06.px(cx))
-            .py(px(2.))
-            .gap(DynamicSpacing::Base04.rems(cx))
-            .rounded_full()
-            .border_1()
-            .border_color(if self.selected {
-                colors.border_selected
-            } else if hovered {
-                colors.border_variant
-            } else {
-                transparent_black()
-            })
-            .bg(if self.selected {
-                colors.ghost_element_selected
-            } else if hovered {
-                colors.ghost_element_hover
-            } else {
-                transparent_black()
-            })
-            .text_color(if self.selected { colors.text } else { colors.text_muted })
+            .max_w(px(STRIP_TAB_MAX_WIDTH))
+            .h(px(22.))
+            .px(px(9.))
+            .gap(px(7.))
+            .rounded(px(8.))
+            .when(lit, |tab| tab.bg(fill))
             .cursor_pointer()
-            .child(h_flex().flex_none().size(px(12.)).justify_center().child(item_indicator(
-                self.activity,
-                self.icon_path,
-                self.grouped,
-                self.space,
-                self.key,
-                cx,
-            )))
+            .child(h_flex().flex_none().size(crate::design::STATUS_TILE).justify_center().child(
+                item_indicator(
+                    self.activity,
+                    self.icon_path,
+                    self.grouped,
+                    self.space,
+                    self.key,
+                    cx,
+                ),
+            ))
             .child(tab_label(
                 self.title,
-                false,
-                if self.selected || hovered { Color::Default } else { Color::Muted },
-                background,
-                hover_background,
+                true,
+                if lit { Color::Default } else { Color::Muted },
+                if self.selected { filled } else { colors.background },
+                filled,
                 self.close_slot,
+                self.selected,
             ))
     }
 }
@@ -464,6 +506,25 @@ pub(crate) struct Activity {
     pub bell: bool,
 }
 
+/// One complete workspace arrangement surfaced as a saved layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutEntry {
+    pub tab: WorkspaceTabId,
+    pub name: Option<String>,
+    pub selected: bool,
+    /// An agent in this layout is blocked on the user.
+    pub needs_you: bool,
+    /// The tab as the strip shows it: its surface's title, icon, and status.
+    pub entry: Option<Entry>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpaceActivity {
+    Live,
+    Waiting,
+    Inactive,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpaceEntries {
     pub id: EntityId,
@@ -472,22 +533,117 @@ pub struct SpaceEntries {
     pub active: bool,
     pub removable: bool,
     pub available: bool,
-    pub entries: Vec<Entry>,
+    pub layouts: Vec<LayoutEntry>,
+    pub activity: Option<SpaceActivity>,
+}
+
+/// An agent the title-bar notice lists: waiting on the user, or working.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentNotice {
+    pub space: EntityId,
+    pub item: ItemId,
+    /// The agent and its space, as in "codex · chartr".
+    pub title: String,
+    /// The conversation title, when the agent reported one.
+    pub detail: Option<String>,
+    pub icon_path: Option<SharedString>,
+    pub waiting: bool,
+}
+
+/// The agents the create menu offers, and the one started most recently in
+/// this app session.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentChoices {
+    pub names: Vec<String>,
+    pub last_used: Option<String>,
+}
+
+/// A directly launchable, non-session-bound surface shown in creation menus.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SurfaceOption {
+    pub title: String,
+    pub key: chartr_plugin::PaneKey,
+    pub icon_path: SharedString,
+    pub external_icon: bool,
+}
+
+/// The create menu shared by space rows and pane bars: a terminal, then agent
+/// chats, then surfaces. Every choice starts in `space`.
+pub fn create_menu(
+    mut menu: crate::components::ContextMenu,
+    space: EntityId,
+    agents: &AgentChoices,
+    surfaces: &[SurfaceOption],
+    on: Emit,
+) -> crate::components::ContextMenu {
+    let terminal = on.clone();
+    menu = menu
+        .entry_with_icon_path(
+            "Terminal",
+            crate::assets::CREATE_TERMINAL_ICON_PATH,
+            move |window, cx| terminal(Action::NewInSpace { space }, window, cx),
+        )
+        .with_shortcut(Box::new(crate::actions::workspace::NewTerminal));
+    if !agents.names.is_empty() {
+        menu = menu.separator().header_with_meta("Agents", agents.names.len().to_string());
+        for name in &agents.names {
+            let start = on.clone();
+            let agent = name.clone();
+            let icon = crate::agent_icons::known_agent_icon(name)
+                .unwrap_or(crate::agent_icons::GENERIC_AGENT_ICON);
+            menu = menu
+                .entry_with_icon_path(name.clone(), icon, move |window, cx| {
+                    start(Action::StartAgentInSpace { space, name: agent.clone() }, window, cx)
+                })
+                .with_icon_color(crate::agent_icons::icon_color(icon))
+                .when(agents.last_used.as_ref() == Some(name), |menu| menu.with_meta("last used"));
+        }
+    }
+    menu = menu.separator().header("Surfaces");
+    for surface in surfaces {
+        let open = on.clone();
+        let key = surface.key.clone();
+        let action = move |window: &mut Window, cx: &mut App| {
+            open(Action::NewSurfaceInSpace { space, key: key.clone() }, window, cx)
+        };
+        menu = if surface.external_icon {
+            menu.entry_with_external_icon_path(
+                surface.title.clone(),
+                surface.icon_path.clone(),
+                action,
+            )
+        } else {
+            menu.entry_with_icon_path(surface.title.clone(), surface.icon_path.clone(), action)
+        };
+    }
+    menu.entry_with_icon_path(
+        "More surfaces…",
+        crate::assets::BROWSE_SURFACES_ICON_PATH,
+        move |window, cx| on(Action::NewPluginPaneInSpace { space }, window, cx),
+    )
+    .with_shortcut(Box::new(crate::actions::workspace::NewSurface))
+    .popup_width(px(236.))
 }
 
 /// What the user did to the chrome.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     ToggleSpaceCollapsed { space: EntityId },
+    ActivateSpace { space: EntityId },
+    ActivateLayout { space: EntityId, tab: WorkspaceTabId },
     Select { space: Option<EntityId>, item: ItemId },
     Close { space: Option<EntityId>, item: ItemId },
     CloseGroup { space: EntityId, tab: WorkspaceTabId },
+    CloseOtherTabs { space: EntityId, tab: WorkspaceTabId },
     UngroupPane { space: EntityId, tab: WorkspaceTabId },
     RenameGroup { space: EntityId, tab: WorkspaceTabId },
+    RenameItem { space: Option<EntityId>, item: ItemId },
     MoveWorkspaceTab { space: EntityId, tab: WorkspaceTabId, target_index: usize },
     BeginSpaceDrag { at: Pixels },
     CloseSpace { space: EntityId },
     RenameSpace { space: EntityId },
+    CommitRename,
+    CancelRename,
     OpenSpaceFolder { space: EntityId },
     LocateSpace { space: EntityId },
     SwitchToTabs,
@@ -496,6 +652,8 @@ pub enum Action {
     NewSpace,
     NewInSpace { space: EntityId },
     NewPluginPaneInSpace { space: EntityId },
+    NewSurfaceInSpace { space: EntityId, key: chartr_plugin::PaneKey },
+    StartAgentInSpace { space: EntityId, name: String },
     New,
     NewPluginPane,
     OpenSettings,
@@ -620,44 +778,49 @@ impl Render for DraggedItemPreview {
 
 /// The fixed leading mark used by sidebar rows, outer tabs, and pane-local tabs.
 ///
-/// Sessions show live Herdr/process state, with a provider icon when idle;
-/// plugins show the Hugeicon named by their manifest. A plain foreground process
-/// gets a slower neutral spinner so it cannot be mistaken for an agent actively working.
+/// States that need the user sit on a tinted tile (`design::status_tile`):
+/// amber needs you, red ended. Working (blue spinner) and done (green check)
+/// are bare glyphs, so the tile works as an alarm. An idle agent shows its
+/// bare brand glyph and plugins their plain Hugeicon. A plain
+/// foreground process gets a slower neutral spinner with no tile so it cannot
+/// be mistaken for an agent actively working.
 pub fn item_indicator(
     activity: Activity,
     icon_path: Option<SharedString>,
     grouped: bool,
     space: &str,
     key: ItemId,
-    _cx: &App,
+    cx: &App,
 ) -> AnyElement {
-    let slot = || div().flex_none().size(px(12.)).flex().items_center().justify_center();
+    let status = cx.theme().status();
+    let slot = || {
+        div().flex_none().size(crate::design::STATUS_TILE).flex().items_center().justify_center()
+    };
     let icon = |name, color| Icon::new(name).size(IconSize::XSmall).color(color);
+    let tile = |name, color| crate::design::status_tile(Icon::new(name), color);
 
     if activity.ended {
-        return slot().child(icon(IconName::XCircle, Color::Error)).into_any_element();
+        return tile(IconName::Close, status.error).into_any_element();
     }
     if grouped {
         return slot().child(icon(IconName::Split, Color::Muted)).into_any_element();
     }
     if activity.bell {
-        return slot().child(icon(IconName::BellRing, Color::Warning)).into_any_element();
+        return tile(IconName::BellRing, status.warning).into_any_element();
     }
 
     match activity.status {
-        Some(SessionStatus::Working) => {
-            slot()
-                .child(icon(IconName::LoadCircle, Color::Accent).with_keyed_rotate_animation(
+        Some(SessionStatus::Working) => slot()
+            .child(
+                icon(IconName::LoadCircle, Color::Custom(status.info)).with_keyed_rotate_animation(
                     format!("working-status-{space}-{}", key.get()),
                     2,
-                ))
-                .into_any_element()
-        }
-        Some(SessionStatus::Blocked) => {
-            slot().child(icon(IconName::DebugPause, Color::Warning)).into_any_element()
-        }
+                ),
+            )
+            .into_any_element(),
+        Some(SessionStatus::Blocked) => tile(IconName::BellRing, status.warning).into_any_element(),
         Some(SessionStatus::Done) => {
-            slot().child(icon(IconName::Check, Color::Success)).into_any_element()
+            slot().child(icon(IconName::Check, Color::Custom(status.success))).into_any_element()
         }
         Some(SessionStatus::Idle | SessionStatus::Unknown) if activity.process_running => {
             slot()
@@ -670,12 +833,13 @@ pub fn item_indicator(
         Some(SessionStatus::Unknown) => gpui::Empty.into_any_element(),
         Some(SessionStatus::Idle) | None => match icon_path {
             Some(path) => {
-                let icon = if path.starts_with("icons/") {
+                let color = crate::agent_icons::icon_color(&path);
+                let glyph = if path.starts_with("icons/") {
                     Icon::from_path(path)
                 } else {
                     Icon::from_external_svg(path)
                 };
-                slot().child(icon.size(IconSize::XSmall).color(Color::Muted)).into_any_element()
+                slot().child(glyph.size(IconSize::XSmall).color(color)).into_any_element()
             }
             None => slot().into_any_element(),
         },

@@ -111,6 +111,11 @@ plutil -insert CFBundleVersion -string "$build_number" "$plist"
 plutil -insert chartrGitRevision -string "$revision" "$plist"
 plutil -insert LSApplicationCategoryType -string public.app-category.developer-tools "$plist"
 plutil -insert NSHighResolutionCapable -bool YES "$plist"
+# Chartr restores its workspace and window bounds through its own state store.
+# Disable AppKit's parallel window restoration so a prior development crash
+# cannot block the next launch behind the system "reopen windows" modal.
+plutil -insert NSQuitAlwaysKeepsWindows -bool NO "$plist"
+plutil -insert NSDisablePersistentUI -bool YES "$plist"
 
 minimum_macos=$(otool -l "$binary" | awk '$1 == "minos" { print $2; exit }')
 [ -n "$minimum_macos" ] || minimum_macos=11.0

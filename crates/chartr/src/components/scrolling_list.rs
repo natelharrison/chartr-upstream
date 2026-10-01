@@ -24,7 +24,10 @@ pub(crate) fn scrolling_list(
 ) -> AnyElement {
     let colors = cx.theme().colors();
     let [thumb, hovered_thumb, active_thumb] = scrollbar_thumb_colors(colors);
-    let scroll_background = colors.panel_background;
+    // Spaces and chat history live directly on the window canvas. Their
+    // scroll fade must use the same color or scrolling reveals a panel-colored
+    // strip above the list.
+    let scroll_background = colors.background;
     let fade_handle = scroll_handle.clone();
     v_flex()
         .relative()

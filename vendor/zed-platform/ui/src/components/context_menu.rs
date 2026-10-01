@@ -1,11 +1,13 @@
 use crate::{
     ButtonCommon, ButtonStyle, IconButtonShape, KeyBinding, List, ListItem, ListSeparator,
-    ListSubHeader, Tooltip, prelude::*, utils::WithRemSize,
+    ListSubHeader, PlatformStyle, Tooltip, prelude::*, render_keybinding_keystroke,
+    utils::WithRemSize,
 };
 use gpui::{
-    Action, Anchor, AnyElement, App, Bounds, DismissEvent, Entity, EventEmitter, FocusHandle,
-    Focusable, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Role,
-    Size, Subscription, TaskExt, anchored, canvas, prelude::*, px, relative,
+    Action, Anchor, AnyElement, App, Bounds, BoxShadow, DismissEvent, Entity, EventEmitter,
+    FocusHandle, Focusable, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, Role, Size, Subscription, TaskExt, anchored, canvas, hsla, img, prelude::*, px,
+    relative, svg,
 };
 use menu::{SelectChild, SelectFirst, SelectLast, SelectNext, SelectParent, SelectPrevious};
 use std::{
@@ -14,7 +16,140 @@ use std::{
     rc::Rc,
     time::{Duration, Instant},
 };
-use theme::BufferLineHeight;
+use theme::{Appearance, BufferLineHeight};
+
+/// Height of one context-menu entry row.
+pub const MENU_ROW_HEIGHT: Pixels = px(28.);
+// Chartr design token RADIUS_MENU; item highlights are 4px inside it.
+const MENU_RADIUS: Pixels = px(8.);
+const MENU_ROW_GROUP: &str = "context_menu_row";
+const KEYCAP_SIZE: Pixels = px(17.);
+
+/// The hairline drawn around a context menu, matching other popovers.
+pub fn menu_outline_color(cx: &App) -> Hsla {
+    cx.theme().colors().border_variant
+}
+
+/// The tint behind a hovered or keyboard-selected entry.
+pub fn menu_highlight_color(destructive: bool, cx: &App) -> Hsla {
+    if destructive {
+        cx.theme().status().error.opacity(0.14)
+    } else {
+        cx.theme().status().info.opacity(0.13)
+    }
+}
+
+/// A flat panel with a theme hairline, one short tight shadow and a 1px light top edge.
+fn menu_panel<E: Styled + ParentElement>(this: E, cx: &App) -> E {
+    let light = cx.theme().appearance() == Appearance::Light;
+    let (shade, edge) = if light { (0.12, 0.7) } else { (0.35, 0.05) };
+    this.relative()
+        .bg(cx.theme().colors().elevated_surface_background)
+        .rounded(MENU_RADIUS)
+        .border_1()
+        .border_color(menu_outline_color(cx))
+        .shadow(vec![BoxShadow::new(px(0.), px(4.), hsla(0., 0., 0., shade)).blur_radius(px(10.))])
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left(MENU_RADIUS)
+                .right(MENU_RADIUS)
+                .h_px()
+                .bg(hsla(0., 0., 1., edge)),
+        )
+}
+
+/// The row tint layer. `ListItem` hardcodes its own hover colours, so menu
+/// rows turn those off and paint this layer underneath instead.
+fn row_highlight(selected: bool, destructive: bool, cx: &App) -> impl IntoElement {
+    let color = menu_highlight_color(destructive, cx);
+    let inset = DynamicSpacing::Base04.rems(cx);
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(inset)
+        .right(inset)
+        // Concentric with the panel's corners at the list's inset.
+        .rounded(MENU_RADIUS - px(4.))
+        .when(selected, |this| this.bg(color))
+        .when(!selected, |this| this.group_hover(MENU_ROW_GROUP, move |style| style.bg(color)))
+}
+
+enum MenuGlyph {
+    Embedded(SharedString),
+    ExternalSvg(SharedString),
+    Raster(SharedString),
+}
+
+/// A muted monochrome glyph that takes the accent colour on hover or selection,
+/// unless the entry sets its own colour.
+fn menu_glyph(
+    glyph: &MenuGlyph,
+    size: IconSize,
+    color: Option<Color>,
+    highlighted: bool,
+    cx: &App,
+) -> AnyElement {
+    let accent = Color::Accent.color(cx);
+    let base = color
+        .unwrap_or(if highlighted { Color::Accent } else { Color::Muted })
+        .color(cx);
+    let tint = |this: gpui::Svg| {
+        this.size(size.rems())
+            .flex_none()
+            .text_color(base)
+            .when(color.is_none(), |this| {
+                this.group_hover(MENU_ROW_GROUP, move |style| style.text_color(accent))
+            })
+            .into_any_element()
+    };
+    match glyph {
+        MenuGlyph::Embedded(path) => tint(svg().path(path.clone())),
+        MenuGlyph::ExternalSvg(path) => tint(svg().external_path(path.clone())),
+        MenuGlyph::Raster(path) => img(std::path::PathBuf::from(path.as_ref()))
+            .size(size.rems())
+            .flex_none()
+            .into_any_element(),
+    }
+}
+
+/// Each key of a shortcut as a small outlined cap.
+fn menu_keycaps(
+    keystrokes: &[gpui::KeybindingKeystroke],
+    disabled: bool,
+    cx: &App,
+) -> AnyElement {
+    let color = Some(if disabled { Color::Disabled } else { Color::Muted });
+    let border = cx.theme().colors().border_variant;
+    h_flex().flex_none().gap(px(2.)).children(
+        keystrokes
+            .iter()
+            .flat_map(|keystroke| {
+                render_keybinding_keystroke(
+                    keystroke,
+                    color,
+                    Some(px(11.).into()),
+                    PlatformStyle::platform(),
+                    false,
+                )
+            })
+            .map(move |key| {
+                h_flex()
+                    .flex_none()
+                    .justify_center()
+                    .h(KEYCAP_SIZE)
+                    .min_w(KEYCAP_SIZE)
+                    .px(px(4.))
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(border)
+                    .child(key)
+            }),
+    )
+    .into_any_element()
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum SubmenuOpenTrigger {
@@ -98,6 +233,8 @@ pub struct ContextMenuEntry {
     end_slot_title: Option<SharedString>,
     end_slot_handler: Option<Rc<dyn Fn(Option<&FocusHandle>, &mut Window, &mut App)>>,
     show_end_slot_on_hover: bool,
+    destructive: bool,
+    meta: Option<SharedString>,
 }
 
 impl ContextMenuEntry {
@@ -120,6 +257,8 @@ impl ContextMenuEntry {
             end_slot_title: None,
             end_slot_handler: None,
             show_end_slot_on_hover: false,
+            destructive: false,
+            meta: None,
         }
     }
 
@@ -184,6 +323,18 @@ impl ContextMenuEntry {
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Draw the label, glyph and highlight in the theme's error colour.
+    pub fn destructive(mut self, destructive: bool) -> Self {
+        self.destructive = destructive;
+        self
+    }
+
+    /// Show short muted text at the end of the row, before any shortcut.
+    pub fn meta(mut self, meta: impl Into<SharedString>) -> Self {
+        self.meta = Some(meta.into());
         self
     }
 
@@ -579,6 +730,8 @@ impl ContextMenu {
             end_slot_title: None,
             end_slot_handler: None,
             show_end_slot_on_hover: false,
+            destructive: false,
+            meta: None,
         }));
         self
     }
@@ -610,6 +763,8 @@ impl ContextMenu {
             end_slot_title: Some(end_slot_title),
             end_slot_handler: Some(Rc::new(move |_, window, cx| end_slot_handler(window, cx))),
             show_end_slot_on_hover: false,
+            destructive: false,
+            meta: None,
         }));
         self
     }
@@ -641,6 +796,8 @@ impl ContextMenu {
             end_slot_title: Some(end_slot_title),
             end_slot_handler: Some(Rc::new(move |_, window, cx| end_slot_handler(window, cx))),
             show_end_slot_on_hover: true,
+            destructive: false,
+            meta: None,
         }));
         self
     }
@@ -685,6 +842,8 @@ impl ContextMenu {
             end_slot_title: None,
             end_slot_handler: None,
             show_end_slot_on_hover: false,
+            destructive: false,
+            meta: None,
         }));
         self
     }
@@ -794,6 +953,8 @@ impl ContextMenu {
             end_slot_title: None,
             end_slot_handler: None,
             show_end_slot_on_hover: false,
+            destructive: false,
+            meta: None,
         }));
         self
     }
@@ -827,6 +988,8 @@ impl ContextMenu {
             end_slot_title: None,
             end_slot_handler: None,
             show_end_slot_on_hover: false,
+            destructive: false,
+            meta: None,
         }));
         self
     }
@@ -862,6 +1025,8 @@ impl ContextMenu {
             end_slot_title: None,
             end_slot_handler: None,
             show_end_slot_on_hover: false,
+            destructive: false,
+            meta: None,
         }));
         self
     }
@@ -1852,7 +2017,10 @@ impl ContextMenu {
             end_slot_handler,
             show_end_slot_on_hover,
             secondary_handler: _,
+            destructive,
+            meta,
         } = entry;
+        let highlighted = Some(ix) == self.selected_index;
         let this = cx.weak_entity();
         // Report the item's keyboard shortcut to assistive technology, resolving
         // the action's binding the same way the visible accelerator (rendered
@@ -1869,16 +2037,24 @@ impl ContextMenu {
         let handler = handler.clone();
         let menu = cx.entity().downgrade();
 
-        let icon_color = if *disabled {
+        // The toggle check keeps its accent; glyphs are muted unless coloured.
+        let toggle_color = if *disabled {
             Color::Muted
-        } else if toggle.is_some() {
-            icon_color.unwrap_or(Color::Accent)
         } else {
-            icon_color.unwrap_or(Color::Default)
+            icon_color.unwrap_or(Color::Accent)
+        };
+        let glyph_color = if *disabled {
+            Some(Color::Disabled)
+        } else if *destructive {
+            Some(icon_color.unwrap_or(Color::Error))
+        } else {
+            *icon_color
         };
 
         let label_color = if *disabled {
             Color::Disabled
+        } else if *destructive {
+            Color::Error
         } else {
             Color::Default
         };
@@ -1886,55 +2062,27 @@ impl ContextMenu {
             .as_ref()
             .is_some_and(|(toggle_position, _)| toggle_position == icon_position);
 
-        let label_element = if let Some(custom_path) = custom_icon_path {
-            h_flex()
-                .gap_1p5()
-                .when(*icon_position == IconPosition::Start && !icon_overlaps_toggle, |flex| {
-                        flex.child(
-                            Icon::from_path(custom_path.clone())
-                                .size(*icon_size)
-                                .color(icon_color),
-                        )
-                    })
-                .child(Label::new(label.clone()).color(label_color).truncate())
-                .when(*icon_position == IconPosition::End && !icon_overlaps_toggle, |flex| {
-                    flex.child(
-                        Icon::from_path(custom_path.clone())
-                            .size(*icon_size)
-                            .color(icon_color),
-                    )
-                })
-                .into_any_element()
-        } else if let Some(custom_icon_svg) = custom_icon_svg {
-            h_flex()
-                .gap_1p5()
-                .when(*icon_position == IconPosition::Start && !icon_overlaps_toggle, |flex| {
-                        flex.child(
-                            Icon::from_external_svg(custom_icon_svg.clone())
-                                .size(*icon_size)
-                                .color(icon_color),
-                        )
-                    })
-                .child(Label::new(label.clone()).color(label_color).truncate())
-                .when(*icon_position == IconPosition::End && !icon_overlaps_toggle, |flex| {
-                    flex.child(
-                        Icon::from_external_svg(custom_icon_svg.clone())
-                            .size(*icon_size)
-                            .color(icon_color),
-                    )
-                })
-                .into_any_element()
-        } else if let Some(icon_name) = icon {
-            h_flex()
-                .gap_1p5()
-                .when(*icon_position == IconPosition::Start && !icon_overlaps_toggle, |flex| {
-                    flex.child(Icon::new(*icon_name).size(*icon_size).color(icon_color))
-                })
-                .child(Label::new(label.clone()).color(label_color).truncate())
-                .when(*icon_position == IconPosition::End && !icon_overlaps_toggle, |flex| {
-                    flex.child(Icon::new(*icon_name).size(*icon_size).color(icon_color))
-                })
-                .into_any_element()
+        let glyph = if let Some(path) = custom_icon_path {
+            Some(if path.starts_with("icons/") {
+                MenuGlyph::Embedded(path.clone())
+            } else {
+                MenuGlyph::Raster(path.clone())
+            })
+        } else if let Some(path) = custom_icon_svg {
+            Some(MenuGlyph::ExternalSvg(path.clone()))
+        } else {
+            icon.map(|name| MenuGlyph::Embedded(name.path().into()))
+        }
+        .filter(|_| !icon_overlaps_toggle);
+
+        let label_element = if let Some(glyph) = glyph {
+            let glyph = menu_glyph(&glyph, *icon_size, glyph_color, highlighted, cx);
+            let label = Label::new(label.clone()).color(label_color).truncate();
+            match icon_position {
+                IconPosition::Start => h_flex().gap_2().child(glyph).child(label),
+                IconPosition::End => h_flex().gap_2().child(label).child(glyph),
+            }
+            .into_any_element()
         } else {
             Label::new(label.clone())
                 .color(label_color)
@@ -1942,10 +2090,27 @@ impl ContextMenu {
                 .into_any_element()
         };
 
+        let keycaps = action.as_ref().and_then(|action| {
+            let binding = self
+                .action_context
+                .clone()
+                .or_else(|| window.focused(cx))
+                .and_then(|focus| {
+                    window.highest_precedence_binding_for_action_in(action.as_ref(), &focus)
+                })
+                .or_else(|| window.highest_precedence_binding_for_action(action.as_ref()))?;
+            Some(menu_keycaps(binding.keystrokes(), *disabled, cx))
+        });
+
         let aside_trigger_bounds = self.aside_trigger_bounds.clone();
 
         div()
             .id(("context-menu-child", ix))
+            .relative()
+            .group(MENU_ROW_GROUP)
+            .when(!*disabled, |this| {
+                this.child(row_highlight(highlighted, *destructive, cx))
+            })
             .when_some(documentation_aside.clone(), |this, documentation_aside| {
                 this.occlude()
                     .on_hover(cx.listener(move |menu, hovered, _, cx| {
@@ -1978,6 +2143,8 @@ impl ContextMenu {
                 ListItem::new(ix)
                     .group_name("label_container")
                     .inset(true)
+                    .height(MENU_ROW_HEIGHT)
+                    .selectable(false)
                     .disabled(*disabled)
                     .aria_role(if toggle.is_some() {
                         Role::MenuItemCheckBox
@@ -2072,7 +2239,7 @@ impl ContextMenu {
                             .flex_none()
                             .child(
                                 Icon::new(icon.unwrap_or(IconName::Check))
-                                    .color(icon_color)
+                                    .color(toggle_color)
                                     .size(*icon_size),
                             )
                             .when(!toggled, |contents| contents.invisible());
@@ -2088,20 +2255,26 @@ impl ContextMenu {
                             .justify_between()
                             .child(label_element)
                             .debug_selector(|| format!("MENU_ITEM-{}", label))
-                            .children(action.as_ref().map(|action| {
-                                let binding = self
-                                    .action_context
-                                    .as_ref()
-                                    .map(|focus| KeyBinding::for_action_in(&**action, focus, cx))
-                                    .unwrap_or_else(|| KeyBinding::for_action(&**action, cx));
-
-                                div()
-                                    .ml_4()
-                                    .child(binding.disabled(*disabled))
-                                    .when(*disabled && documentation_aside.is_some(), |parent| {
-                                        parent.invisible()
-                                    })
-                            }))
+                            .when(meta.is_some() || keycaps.is_some(), |this| {
+                                this.child(
+                                    h_flex()
+                                        .ml_4()
+                                        .gap_2()
+                                        .flex_none()
+                                        .when_some(meta.clone(), |this, meta| {
+                                            this.child(
+                                                Label::new(meta)
+                                                    .size(LabelSize::Small)
+                                                    .color(Color::Muted),
+                                            )
+                                        })
+                                        .children(keycaps)
+                                        .when(
+                                            *disabled && documentation_aside.is_some(),
+                                            |parent| parent.invisible(),
+                                        ),
+                                )
+                            })
                             .when(*disabled && documentation_aside.is_some(), |parent| {
                                 parent.child(
                                     Icon::new(IconName::Info)
@@ -2283,11 +2456,13 @@ impl Render for ContextMenu {
             .top_0()
             .left_0();
 
-            WithRemSize::new(ui_font_size)
-                .occlude()
-                .font_family(ui_font_family.clone())
-                .line_height(line_height)
-                .elevation_2(cx)
+            menu_panel(
+                WithRemSize::new(ui_font_size)
+                    .occlude()
+                    .font_family(ui_font_family.clone())
+                    .line_height(line_height),
+                cx,
+            )
                 // The requested width includes the border. Giving it to the
                 // inner list makes that list overflow the right-hand inset.
                 .when_some(self.fixed_width, |this, width| this.w(width))

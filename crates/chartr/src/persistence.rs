@@ -39,7 +39,7 @@ impl Default for WindowState {
             chrome: Mode::Sidebar,
             terminal_mode: Mode::Sidebar,
             selected_conversation: None,
-            sidebar_width: 280.,
+            sidebar_width: 192.,
             active_space: Some("ad-hoc".to_owned()),
             bounds: None,
         }
@@ -78,6 +78,12 @@ pub enum PersistedItem {
     Terminal {
         item_id: u64,
         backend_id: String,
+        #[serde(default)]
+        recovery: Option<TerminalRecovery>,
+    },
+    Ended {
+        item_id: u64,
+        recovery: TerminalRecovery,
     },
     Plugin {
         item_id: u64,
@@ -88,10 +94,41 @@ pub enum PersistedItem {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalRecovery {
+    pub backend_id: String,
+    pub title: String,
+    pub cwd: Option<PathBuf>,
+    pub agent: Option<String>,
+    pub native: Option<chartr_conversations::NativeSession>,
+}
+
+impl TerminalRecovery {
+    pub fn from_session(session: &chartr_herdr::control::Session) -> Self {
+        let native = session.agent_session.as_ref().and_then(|identity| {
+            let provider = chartr_conversations::Provider::detect(&identity.agent)?;
+            chartr_conversations::NativeSession::from_identity(
+                provider,
+                &identity.kind,
+                &identity.value,
+            )
+        });
+        Self {
+            backend_id: session.id.0.clone(),
+            title: session.label.clone(),
+            cwd: session.cwd.clone(),
+            agent: session.agent.clone(),
+            native,
+        }
+    }
+}
+
 impl PersistedItem {
     pub fn item_id(&self) -> u64 {
         match self {
-            Self::Terminal { item_id, .. } | Self::Plugin { item_id, .. } => *item_id,
+            Self::Terminal { item_id, .. }
+            | Self::Ended { item_id, .. }
+            | Self::Plugin { item_id, .. } => *item_id,
         }
     }
 }
@@ -321,6 +358,7 @@ mod tests {
             items: vec![PersistedItem::Terminal {
                 item_id: item.get(),
                 backend_id: "pane-1".to_owned(),
+                recovery: None,
             }],
             expanded: true,
         }
@@ -340,6 +378,7 @@ mod tests {
     fn a_new_window_uses_the_shipped_chrome_defaults() {
         let window = WindowState::default();
         assert_eq!(window.chrome, Mode::Sidebar);
+        assert_eq!(window.sidebar_width, 192.);
     }
 
     #[test]

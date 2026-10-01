@@ -3,7 +3,7 @@
 Build and launch chartr using the [installation guide](installation.md), then
 set up your workspace:
 
-1. **Open a space.** Add a project folder, or use Free sessions for a shell
+1. **Open a space.** Add a project folder, or use Scratch for a shell
    outside a project. The `+` button opens a terminal.
 2. **Register an agent.** Open the **Agent** settings gear in **Settings → Plugins** and
    add an installed CLI agent and its launch settings.

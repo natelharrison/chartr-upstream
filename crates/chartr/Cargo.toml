@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 default-run = "chartr"
 
+[features]
+ui-lab = ["gpui/test-support", "gpui_platform/test-support"]
+
 [dependencies]
 chartr-native-plugin = { path = "../chartr-native-plugin" }
 libloading = "0.8"

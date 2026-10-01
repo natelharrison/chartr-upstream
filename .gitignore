@@ -4,3 +4,28 @@ plugins/*/target
 examples/plugins/*/target
 /web/node_modules/
 /bin/chartr
+
+# Personal planning, research, and local-only publication material.
+# Upstream's existing files under these paths stay tracked.
+/.plan/
+/notes/
+/reports/
+/handoffs/
+/docs/research/
+/prototypes/
+/work/
+
+# Local configuration, credentials, runtime state, and session exports.
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
+*.db
+*.jsonl
+.DS_Store

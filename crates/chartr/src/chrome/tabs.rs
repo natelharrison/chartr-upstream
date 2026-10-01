@@ -1,47 +1,82 @@
-//! Tabs mode: standalone tabs and pane groups in a horizontal strip.
+//! Tabs mode: the sidebar's space tree turned sideways.
 //!
-//! The mode for a handful of sessions you are switching between quickly. A tab
-//! has no second line, so the agent's name is dropped here rather than
-//! squeezed in — the dot still carries the state, and the title carries the
-//! identity.
+//! Every space is a quiet tab. The active space is outlined and holds its
+//! layouts, as its open row does in the sidebar. The items arrive from the
+//! left, where the sidebar rows just left.
 
-use gpui::Entity;
-use ui::{ButtonSize, IconButtonShape, Tab, Tooltip, prelude::*};
+use gpui::{Entity, FontWeight, Hsla};
+use ui::{ButtonSize, IconButtonShape, Tooltip, prelude::*};
 
 use super::Emit;
 
 use super::tab_sorter::{SortableTab, SortableTabList};
-use super::{Action, DraggedItem, Entry, ItemTab, tab_position};
+use super::{Action, DraggedItem, Entry, ItemTab, SpaceEntries};
 use crate::components::SortAxis;
 use crate::components::{ContextMenu, popup_right_click_menu};
+use crate::fonts::UI_TEXT_DEFAULT;
 use crate::settings::SettingsStore;
 use crate::workspace::WorkspaceTabId;
-const SPACE_SWITCHER_MAX_WIDTH: f32 = 200.;
+
+/// Strip height; the Inset surface adds a gap below it.
+pub(crate) const HEIGHT: f32 = 30.;
+/// How far each item travels in from the left while the strip opens.
+const ARRIVAL_OFFSET: f32 = 28.;
+/// Stagger between neighbouring items, capped after the sixth.
+const ARRIVAL_STAGGER: f32 = 0.03;
 
 type HoveredTab = Option<(gpui::EntityId, WorkspaceTabId)>;
 
-pub(crate) fn height(cx: &App) -> Pixels {
-    Tab::container_height(cx) + px(4.)
+/// Recover linear progress from the eased mode reveal, then delay each item
+/// a little more than the last so they arrive one after another.
+fn arrival(reveal: f32, index: usize) -> f32 {
+    if reveal >= 1. {
+        return 1.;
+    }
+    let scale = 1. - 2_f32.powi(-10);
+    let linear = (-(1. - reveal.clamp(0., 1.) * scale).log2() / 10.).clamp(0., 1.);
+    let delay = ARRIVAL_STAGGER * index.min(5) as f32;
+    let local = ((linear - delay) / (1. - delay)).clamp(0., 1.);
+    (1. - 2_f32.powf(-10. * local)) / scale
 }
 
+fn arriving(item: impl IntoElement, reveal: f32, index: usize) -> AnyElement {
+    let t = arrival(reveal, index);
+    div()
+        .relative()
+        .flex_none()
+        .left(px(-ARRIVAL_OFFSET * (1. - t)))
+        .opacity(t)
+        .child(item)
+        .into_any_element()
+}
+
+fn needs_you_dot(_color: Hsla, cx: &App) -> impl IntoElement {
+    crate::design::needs_you_tile(cx)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn render(
+    spaces: &[SpaceEntries],
     entries: &[Entry],
-    controls: Option<(AnyElement, AnyElement)>,
-    new_item: AnyElement,
-    new_plugin_pane: AnyElement,
+    end_control: Option<AnyElement>,
+    create: AnyElement,
+    reveal: f32,
     on: Emit,
     window: &mut Window,
     cx: &mut App,
 ) -> impl IntoElement {
-    let strip_height = height(cx);
-    let content_height = strip_height;
     // Use stable workspace identities so hover cannot move to an unrelated
     // tab when entries are reordered, closed, or the current space changes.
     let hovered_tab = window.use_keyed_state("workspace-tab-hover", cx, |_, _| HoveredTab::None);
-    let hovered = *hovered_tab.read(cx);
+    let colors = cx.theme().colors();
+    let text = colors.text;
+    let muted = colors.text_muted;
+    let outline = colors.border_variant;
+    let needs_you = cx.theme().status().warning;
     let move_tab = on.clone();
     let space = entries.first().map(|entry| entry.space);
     let space_key = entries.first().map(|entry| entry.space_key.as_str()).unwrap_or_default();
+    let active = spaces.iter().find(|space| space.active);
     let tabs = entries
         .iter()
         .enumerate()
@@ -55,71 +90,26 @@ pub fn render(
                 top_level: true,
                 grouped: entry.grouped,
             };
+            let layout_needs_you = active.is_some_and(|space| {
+                space.layouts.iter().any(|layout| layout.tab == entry.tab && layout.needs_you)
+            });
             let entry = entry.clone();
             let on = on.clone();
             let hovered_tab = hovered_tab.clone();
-            SortableTab::new(dragged, entry.selected, move |placement, cx| {
-                let separator_color = cx.theme().colors().border_variant.opacity(0.5);
-                let previous_selected = placement.index.checked_sub(1) == placement.active_index;
-                let previous_hovered = placement.previous.is_some_and(|previous| {
-                    hovered
-                        .is_some_and(|(space, tab)| space == entry.space && tab.get() == previous)
-                });
-                let separator_visible = placement.previous.is_some()
-                    && !previous_selected
-                    && !entry.selected
-                    && !previous_hovered
-                    && hovered != Some((entry.space, entry.tab));
-                let trailing_separator_visible = placement.index + 1 == placement.count
-                    && !entry.selected
-                    && hovered != Some((entry.space, entry.tab));
+            SortableTab::new(dragged, move |placement, cx| {
                 h_flex()
-                    .relative()
-                    .w_full()
-                    .child(tab(
-                        placement.index,
-                        placement.count,
-                        placement.active_index,
-                        &entry,
-                        &hovered_tab,
-                        on,
-                        cx,
-                    ))
-                    .child(
-                        div()
-                            .absolute()
-                            .left(gpui::rems(-0.125))
-                            .w(px(1.))
-                            .h(px(12.))
-                            .bg(separator_color)
-                            .opacity(if separator_visible { 1. } else { 0. }),
-                    )
-                    .when(trailing_separator_visible, |tab| {
-                        tab.child(
-                            div()
-                                .absolute()
-                                .right(gpui::rems(-0.125))
-                                .w(px(1.))
-                                .h(px(12.))
-                                .bg(separator_color),
-                        )
-                    })
+                    .gap(px(5.))
+                    .child(tab(placement.index, &entry, &hovered_tab, on, cx))
+                    .when(layout_needs_you, |tab| tab.child(needs_you_dot(needs_you, cx)))
                     .into_any_element()
             })
         })
         .collect();
     let list = SortableTabList::new(
         format!("workspace-tab-sorter-{space_key}"),
-        h_flex()
-            .id("workspace-tab-list")
-            .min_w_0()
-            .h(content_height)
-            .px_1()
-            .py(px(2.))
-            .flex_shrink_1()
-            .overflow_x_scroll(),
+        h_flex().id("workspace-tab-list").flex_none().h(px(24.)),
         SortAxis::Horizontal,
-        gpui::rems(0.25),
+        gpui::rems(2. / 14.),
         tabs,
         move |dragged, target_index, window, cx| {
             if let Some(space) = space {
@@ -130,47 +120,103 @@ pub fn render(
                 );
             }
         },
-    )
-    .tab_min_width(ItemTab::min_width(true, cx))
-    .drag_lane(
-        h_flex().id("workspace-tab-strip").w_full().min_w_0().h(content_height),
-        h_flex()
-            .h(content_height)
-            .flex_none()
-            .px(DynamicSpacing::Base04.rems(cx))
-            .gap_px()
-            .child(new_item)
-            .child(new_plugin_pane),
     );
+    let mut list = Some(list);
+    // The strip's + and ▧ ride at the end of the current space's group, so
+    // they read as "add to this space" and stay apart from the pane bar's.
+    let mut create = Some(create);
 
-    let (start, end) = controls.unzip();
-    // The workspace owns the separator below this strip, including during
-    // mode transitions when a sidebar is visible alongside it.
+    let mut items = Vec::with_capacity(spaces.len() + 1);
+    for (index, space) in spaces.iter().enumerate() {
+        let id = space.id;
+        let activate = on.clone();
+        let label = h_flex()
+            .id(format!("strip-space-{id:?}"))
+            .flex_none()
+            .h(px(if space.active { 24. } else { 26. }))
+            .pl(px(10.))
+            .pr(px(7.))
+            .gap(px(8.))
+            .rounded(crate::design::RADIUS_CONTROL)
+            .role(gpui::Role::Tab)
+            .aria_label(space.name.clone())
+            .aria_selected(space.active)
+            .text_size(UI_TEXT_DEFAULT)
+            .font_weight(if space.active { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
+            .text_color(if space.active { text } else { muted })
+            .hover(move |style| style.text_color(text))
+            .debug_selector(move || format!("STRIP_SPACE_{index}"))
+            .on_click(move |_, window, cx| {
+                activate(Action::ActivateSpace { space: id }, window, cx)
+            })
+            .child(space.name.clone())
+            .when(!space.active && space.layouts.iter().any(|layout| layout.needs_you), |tab| {
+                tab.child(needs_you_dot(needs_you, cx))
+            });
+        let item = if space.active {
+            h_flex()
+                .flex_none()
+                .mx(px(4.))
+                .pl(px(1.))
+                .pr(px(2.))
+                .py(px(1.))
+                .gap(px(2.))
+                .border_1()
+                .border_color(outline)
+                .rounded(crate::design::RADIUS_MENU)
+                .child(label)
+                .children(list.take())
+                .children(create.take().map(|create| div().ml(px(2.)).child(create)))
+                .into_any_element()
+        } else {
+            label.into_any_element()
+        };
+        items.push(arriving(item, reveal, index));
+    }
+    let add_space = on.clone();
+    items.push(arriving(
+        h_flex()
+            .id("strip-new-space")
+            .debug_selector(|| "STRIP_NEW_SPACE".into())
+            .flex_none()
+            .h(px(26.))
+            .px(px(8.))
+            .gap(px(6.))
+            .rounded(crate::design::RADIUS_CONTROL)
+            .role(gpui::Role::Button)
+            .aria_label("New Space")
+            .text_size(UI_TEXT_DEFAULT)
+            .text_color(muted)
+            .hover(move |style| style.text_color(text))
+            .tooltip(Tooltip::text("New space"))
+            .on_click(move |_, window, cx| add_space(Action::NewSpace, window, cx))
+            .child(Icon::new(IconName::Plus).size(IconSize::Small).color(Color::Muted)),
+        reveal,
+        spaces.len(),
+    ));
+
     h_flex()
         .id("workspace-tabs")
         .group("tab_bar")
         .w_full()
-        .h(strip_height)
+        .h(px(HEIGHT))
         .flex_none()
-        .bg(cx.theme().colors().panel_background)
-        .when_some(start, |strip, space_switcher| {
-            strip.child(
-                h_flex()
-                    .flex_none()
-                    .px(DynamicSpacing::Base06.rems(cx))
-                    .child(h_flex().max_w(px(SPACE_SWITCHER_MAX_WIDTH)).child(space_switcher)),
-            )
-        })
-        .child(div().flex_1().min_w_0().h_full().overflow_x_hidden().child(list))
-        .when_some(end, |strip, view_menu| {
-            strip.child(h_flex().flex_none().px(DynamicSpacing::Base06.rems(cx)).child(view_menu))
-        })
+        .gap(px(4.))
+        .child(
+            h_flex()
+                .id("workspace-strip-tree")
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .gap(px(2.))
+                .overflow_x_scroll()
+                .children(items),
+        )
+        .child(h_flex().flex_none().pr(px(2.)).gap(px(4.)).children(create).children(end_control))
 }
 
 fn tab(
     index: usize,
-    count: usize,
-    active_index: Option<usize>,
     entry: &Entry,
     hovered_tab: &Entity<HoveredTab>,
     on: Emit,
@@ -179,7 +225,6 @@ fn tab(
     let close = on.clone();
     let middle_close = on.clone();
     let middle_click_closes_tab = cx.global::<SettingsStore>().resolved().middle_click_closes_tab;
-    let position = tab_position(index, count, active_index);
     let select = entry.key;
     let select_item = on.clone();
     let ungroup = on.clone();
@@ -222,7 +267,6 @@ fn tab(
         format!("workspace-tab-{space:?}-{}", entry.tab.get()),
         entry.title.clone(),
         entry.selected,
-        position,
         &entry.space_key,
         entry.key,
     )
@@ -277,9 +321,9 @@ fn tab(
     });
 
     if grouped {
-        // The menu's content-sized wrapper needs a block that fills the flex slot.
+        // Keep the menu wrapper as wide as the tab itself.
         div()
-            .w_full()
+            .flex_none()
             .child(
                 popup_right_click_menu(format!("group-tab-menu-{space:?}-{}", close_tab.get()))
                     .trigger(move |_, _, _| tab)
@@ -287,7 +331,7 @@ fn tab(
                         let ungroup = ungroup.clone();
                         let rename = rename.clone();
                         ContextMenu::build_popup(window, cx, move |menu| {
-                            menu.entry("Rename", None, move |window, cx| {
+                            menu.entry("Rename Tab", None, move |window, cx| {
                                 rename(Action::RenameGroup { space, tab: close_tab }, window, cx)
                             })
                             .entry(
@@ -343,8 +387,6 @@ mod tests {
             };
             div().size_full().child(h_flex().w(px(self.width)).child(tab(
                 0,
-                1,
-                None,
                 &entry,
                 &hovered,
                 Rc::new(|_, _, _| {}),
@@ -353,8 +395,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn strip_items_arrive_in_order_and_settle_together() {
+        for index in 0..8 {
+            assert_eq!(arrival(0., index), 0.);
+            assert_eq!(arrival(1., index), 1.);
+        }
+        for reveal in [0.2, 0.5, 0.9] {
+            let first = arrival(reveal, 0);
+            assert!((first - reveal).abs() < 1e-4, "the first item follows the strip");
+            for index in 1..8 {
+                assert!(arrival(reveal, index) <= arrival(reveal, index - 1));
+            }
+            assert_eq!(arrival(reveal, 5), arrival(reveal, 7), "the stagger is capped");
+        }
+    }
+
     #[gpui::test]
-    fn grouped_tab_menu_fills_its_slot_before_and_during_hover(cx: &mut TestAppContext) {
+    fn strip_tabs_fit_their_title_and_hold_still_on_hover(cx: &mut TestAppContext) {
         cx.update(|cx| {
             ::settings::init(cx);
             theme::init(theme::LoadThemes::JustBase, cx);
@@ -371,7 +429,7 @@ mod tests {
                 cx.simulate_mouse_move(point(px(400.), px(100.)), None, Modifiers::none());
                 cx.run_until_parked();
                 let before = cx.debug_bounds("WORKSPACE_TAB_1").unwrap();
-                assert_eq!(before.size.width, px(width), "grouped={grouped}");
+                assert!(before.size.width < px(110.), "grouped={grouped}");
                 cx.simulate_mouse_move(
                     point(before.right() - px(5.), before.center().y),
                     None,

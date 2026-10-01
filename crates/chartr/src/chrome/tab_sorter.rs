@@ -21,24 +21,19 @@ fn key(dragged: &DraggedItem) -> u64 {
 
 pub(crate) struct Placement {
     pub index: usize,
-    pub count: usize,
-    pub active_index: Option<usize>,
-    pub previous: Option<u64>,
 }
 
 pub(crate) struct SortableTab {
     dragged: DraggedItem,
-    selected: bool,
     render: Box<dyn FnOnce(Placement, &mut App) -> AnyElement>,
 }
 
 impl SortableTab {
     pub fn new(
         dragged: DraggedItem,
-        selected: bool,
         render: impl FnOnce(Placement, &mut App) -> AnyElement + 'static,
     ) -> Self {
-        Self { dragged, selected, render: Box::new(render) }
+        Self { dragged, render: Box::new(render) }
     }
 }
 
@@ -113,17 +108,13 @@ impl RenderOnce for SortableTabList {
             }
         });
         sorter.read(cx).arrange(&mut self.tabs, |tab| key(&tab.dragged));
-        let count = self.tabs.len();
-        let active_index = self.tabs.iter().position(|tab| tab.selected);
-        let mut previous = None;
         let children: Vec<_> = self
             .tabs
             .into_iter()
             .enumerate()
             .map(|(index, tab)| {
                 let id = key(&tab.dragged);
-                let placement = Placement { index, count, active_index, previous };
-                previous = Some(id);
+                let placement = Placement { index };
                 let held = sorter.read(cx).holds(id);
                 let offset = sorter.read(cx).offset_of(id, now, reduce_motion);
                 let child = (tab.render)(placement, cx);
@@ -179,6 +170,7 @@ impl RenderOnce for SortableTabList {
                 return;
             }
             moving.update(cx, |sorter, cx| {
+                sorter.set_drag_lane_bounds(event.bounds);
                 // Leaving the strip restores the model order and allows the
                 // existing pane/edge drop targets to take over immediately.
                 let point = event.event.position;
@@ -203,7 +195,10 @@ impl RenderOnce for SortableTabList {
             });
         })
         .capture_any_mouse_up(move |event, window, cx| {
-            if event.button != MouseButton::Left || !dropping.read(cx).is_dragging() {
+            if event.button != MouseButton::Left
+                || !dropping.read(cx).is_dragging()
+                || !dropping.read(cx).release_is_in_drag_lane(event.position)
+            {
                 return;
             }
             let now = cx.background_executor().now();
@@ -289,7 +284,7 @@ mod tests {
                         this.legacy_drops += 1;
                         cx.notify();
                     });
-                    SortableTab::new(dragged, id == 1, move |_, _| {
+                    SortableTab::new(dragged, move |_, _| {
                         painted.borrow_mut().push(id);
                         div()
                             .id(("test-tab", id))
@@ -368,16 +363,21 @@ mod tests {
                 sortable
             };
             div().size_full().child(sortable).child(
-                div()
-                    .id("foreign-drop")
-                    .w(px(150.))
-                    .h(px(100.))
-                    .mt(px(100.))
-                    .debug_selector(|| "FOREIGN_DROP".into())
-                    .on_drop(cx.listener(|this, _: &DraggedItem, _, cx| {
-                        this.legacy_drops += 1;
-                        cx.notify();
-                    })),
+                div().group("foreign-drop-group").w(px(150.)).h(px(100.)).mt(px(100.)).child(
+                    div()
+                        .id("foreign-drop")
+                        .size_full()
+                        .invisible()
+                        .can_drop(|value, _, _| value.downcast_ref::<DraggedItem>().is_some())
+                        .group_drag_over::<DraggedItem>("foreign-drop-group", |style| {
+                            style.visible()
+                        })
+                        .debug_selector(|| "FOREIGN_DROP".into())
+                        .on_drop(cx.listener(|this, _: &DraggedItem, _, cx| {
+                            this.legacy_drops += 1;
+                            cx.notify();
+                        })),
+                ),
             )
         }
     }
@@ -425,16 +425,11 @@ mod tests {
                         grouped: false,
                     };
                     let item = dragged.item;
-                    SortableTab::new(dragged, index == 0, move |placement, cx| {
+                    SortableTab::new(dragged, move |_, cx| {
                         let tab = crate::chrome::ItemTab::new(
                             format!("sized-tab-{id}"),
                             title,
                             index == 0,
-                            crate::chrome::tab_position(
-                                placement.index,
-                                placement.count,
-                                placement.active_index,
-                            ),
                             "test",
                             item,
                         )
@@ -485,7 +480,8 @@ mod tests {
     #[gpui::test]
     fn tab_widths_are_equal_capped_and_shrink_to_the_existing_minimum(cx: &mut TestAppContext) {
         init(cx);
-        for rounded in [false, true] {
+        // Pane tabs only: strip tabs size to their titles instead.
+        for rounded in [false] {
             let (view, cx) = cx.add_window_view(|_, _| SizingHarness { width: 800., rounded });
             for width in [800., 450., 180., 800.] {
                 view.update(cx, |view, cx| {
@@ -516,7 +512,8 @@ mod tests {
                     if width >= 450. {
                         cx.simulate_mouse_move(point(px(750.), px(100.)), None, Modifiers::none());
                         cx.run_until_parked();
-                        assert!(cx.debug_bounds(close_selector).is_none());
+                        // The selected tab keeps its close button; others show it on hover.
+                        assert_eq!(cx.debug_bounds(close_selector).is_some(), id == 1);
                         cx.simulate_mouse_move(tab.center(), None, Modifiers::none());
                         cx.run_until_parked();
                         let close = cx.debug_bounds(close_selector).unwrap();
@@ -536,7 +533,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn overflowing_titles_fade_and_hover_widens_the_fade(cx: &mut TestAppContext) {
+    fn overflowing_titles_fade_and_the_close_button_never_covers_them(cx: &mut TestAppContext) {
         init(cx);
         for rounded in [false, true] {
             let (_, cx) = cx.add_window_view(|_, _| SizingHarness { width: 800., rounded });
@@ -553,17 +550,18 @@ mod tests {
                 cx.update(|window, cx| {
                     let colors = cx.theme().colors();
                     let background = if rounded {
-                        let panel = colors.background.blend(colors.panel_background);
-                        if hovered { panel.blend(colors.ghost_element_hover) } else { panel }
+                        let filled = colors.background.blend(colors.text.opacity(0.05));
+                        if hovered { filled } else { colors.background }
                     } else {
-                        colors
+                        let resting = colors
                             .background
                             .blend(colors.tab_bar_background)
-                            .blend(colors.tab_inactive_background)
+                            .blend(colors.tab_inactive_background);
+                        if hovered { resting.blend(crate::design::hover_tint(cx)) } else { resting }
                     };
                     let gradient = gpui::linear_gradient(
                         90.,
-                        gpui::linear_color_stop(background, if hovered { 0.6 } else { 1. }),
+                        gpui::linear_color_stop(background, 1.),
                         gpui::linear_color_stop(background.opacity(0.), 0.),
                     );
                     let fades: Vec<_> = window
@@ -573,10 +571,8 @@ mod tests {
                         .collect();
                     // Only the overflowing title fades; the two short titles stay intact.
                     assert_eq!(fades.len(), 1, "rounded={rounded}, hovered={hovered}");
-                    assert_eq!(
-                        fades[0].bounds.size.width.as_f32() / window.scale_factor(),
-                        if hovered { 48. } else { 20. }
-                    );
+                    // The close button has its own slot, so hover never widens the fade.
+                    assert_eq!(fades[0].bounds.size.width.as_f32() / window.scale_factor(), 20.);
                 });
             }
         }
@@ -796,33 +792,37 @@ mod tests {
     #[gpui::test]
     fn a_tab_can_leave_its_preview_and_drop_into_another_pane(cx: &mut TestAppContext) {
         init(cx);
-        let (view, cx) = cx.add_window_view(|_, _| harness(SortAxis::Horizontal, true));
-        cx.run_until_parked();
-        let source = cx.debug_bounds("SORT_TAB_2").unwrap().center();
-        cx.simulate_mouse_down(source, MouseButton::Left, Modifiers::none());
-        cx.simulate_mouse_move(
-            source + point(px(8.), px(0.)),
-            Some(MouseButton::Left),
-            Modifiers::none(),
-        );
-        cx.simulate_mouse_move(point(px(5.), px(5.)), Some(MouseButton::Left), Modifiers::none());
-        cx.run_until_parked();
-        assert_eq!(
-            view.read_with(cx, |this, _| this.painted_order.borrow().clone()),
-            vec![2, 1, 3]
-        );
-        let foreign = cx.debug_bounds("FOREIGN_DROP").unwrap().center();
-        cx.simulate_mouse_move(foreign, Some(MouseButton::Left), Modifiers::none());
-        cx.run_until_parked();
-        assert!(cx.read(|cx| cx.has_active_drag()));
-        assert_eq!(
-            view.read_with(cx, |this, _| this.painted_order.borrow().clone()),
-            vec![1, 2, 3]
-        );
-        cx.simulate_mouse_up(foreign, MouseButton::Left, Modifiers::none());
-        assert_eq!(
-            view.read_with(cx, |this, _| (this.commits, this.legacy_drops, this.clicks)),
-            (0, 1, 0)
-        );
+        for (axis, pane_tabs) in [(SortAxis::Horizontal, true), (SortAxis::Vertical, false)] {
+            let (view, cx) = cx.add_window_view(|_, _| harness(axis, pane_tabs));
+            cx.run_until_parked();
+            let source = cx.debug_bounds("SORT_TAB_2").unwrap().center();
+            cx.simulate_mouse_down(source, MouseButton::Left, Modifiers::none());
+            cx.simulate_mouse_move(
+                source + point(px(8.), px(0.)),
+                Some(MouseButton::Left),
+                Modifiers::none(),
+            );
+            let first = cx.debug_bounds("SORT_TAB_1").unwrap();
+            cx.simulate_mouse_move(
+                first.origin + point(px(5.), px(5.)),
+                Some(MouseButton::Left),
+                Modifiers::none(),
+            );
+            cx.run_until_parked();
+            assert!(cx.read(|cx| cx.has_active_drag()));
+            let foreign = cx.debug_bounds("FOREIGN_DROP").unwrap().center();
+            cx.simulate_mouse_move(foreign, Some(MouseButton::Left), Modifiers::none());
+            cx.run_until_parked();
+            assert!(cx.read(|cx| cx.has_active_drag()));
+            assert_eq!(
+                view.read_with(cx, |this, _| this.painted_order.borrow().clone()),
+                vec![1, 2, 3]
+            );
+            cx.simulate_mouse_up(foreign, MouseButton::Left, Modifiers::none());
+            assert_eq!(
+                view.read_with(cx, |this, _| (this.commits, this.legacy_drops, this.clicks)),
+                (0, 1, 0)
+            );
+        }
     }
 }

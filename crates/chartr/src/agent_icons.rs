@@ -5,6 +5,16 @@
 
 pub(crate) const GENERIC_AGENT_ICON: &str = "icons/agent_ai_programming.svg";
 
+/// The colour an agent glyph is drawn in. Brand colour is the one place colour
+/// identifies an agent, so it applies to the glyph only; others stay muted.
+pub(crate) fn icon_color(icon_path: &str) -> ui::Color {
+    match icon_path {
+        "icons/agent_pi.svg" => ui::Color::Custom(gpui::rgb(0x9d86ff).into()),
+        "icons/agent_claude.svg" => ui::Color::Custom(gpui::rgb(0xe39a72).into()),
+        _ => ui::Color::Muted,
+    }
+}
+
 pub(crate) fn session_icon(agent: Option<&str>, running: Option<&str>) -> Option<&'static str> {
     agent.and_then(known_agent_icon).or_else(|| {
         let executable = std::path::Path::new(running?).file_name()?.to_str()?;
@@ -54,6 +64,14 @@ pub(crate) fn known_agent_icon(value: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
     use gpui::AssetSource;
+
+    #[test]
+    fn only_brand_glyphs_carry_colour() {
+        assert_ne!(icon_color("icons/agent_pi.svg"), ui::Color::Muted);
+        assert_ne!(icon_color("icons/agent_claude.svg"), ui::Color::Muted);
+        assert_eq!(icon_color("icons/agent_chat_gpt.svg"), ui::Color::Muted);
+        assert_eq!(icon_color("icons/tool_terminal.svg"), ui::Color::Muted);
+    }
 
     #[test]
     fn popular_harnesses_resolve_to_embedded_provider_icons() {

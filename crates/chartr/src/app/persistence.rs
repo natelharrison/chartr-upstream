@@ -78,6 +78,29 @@ mod tests {
     }
 
     #[test]
+    fn ended_tabs_survive_save_and_load() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite");
+        let mut saved = saved_workspace();
+        let id = saved.spaces[0].items[0].item_id();
+        saved.spaces[0].items = vec![PersistedItem::Ended {
+            item_id: id,
+            recovery: crate::persistence::TerminalRecovery {
+                backend_id: "old-terminal".into(),
+                title: "Work".into(),
+                cwd: Some(PathBuf::from("/tmp/project/subdir")),
+                agent: Some("pi".into()),
+                native: Some(chartr_conversations::NativeSession {
+                    id: "native-id".into(),
+                    path: Some(PathBuf::from("/tmp/session_native-id.jsonl")),
+                }),
+            },
+        }];
+        StateStore::open(&path).unwrap().save(&saved).unwrap();
+        assert_eq!(StateStore::open(&path).unwrap().load().unwrap(), saved);
+    }
+
+    #[test]
     fn malformed_space_preserves_healthy_layouts_and_plugin_state() {
         assert_failed_restore_preserves_database(
             "INSERT INTO spaces (space_key, ordinal, value_json) VALUES ('damaged', 1, '{')",

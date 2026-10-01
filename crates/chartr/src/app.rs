@@ -24,6 +24,11 @@ mod tests;
 mod view;
 mod window_chrome;
 
+#[cfg(feature = "ui-lab")]
+pub(crate) use view::rounded_corner_masks;
+#[cfg(feature = "ui-lab")]
+pub(crate) use window_chrome::{TITLE_BRAND_HEIGHT, TITLE_BRAND_WIDTH, TITLE_CONTROLS_TOP};
+
 use bundled_plugins::load_plugin_catalog;
 
 use std::{
@@ -42,7 +47,7 @@ use gpui::{
 };
 use ui::{
     Banner, ButtonLike, ButtonSize, IconButtonShape, IconPosition, ListItem, ListItemSpacing,
-    Severity, TabBar, Tooltip, prelude::*,
+    Severity, Tooltip, prelude::*,
 };
 
 use crate::{
@@ -151,6 +156,13 @@ enum PaletteCommand {
     OpenSettings,
 }
 
+/// What a tab rename applies to: a whole sidebar tab or one pane tab in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenameTarget {
+    Tab(WorkspaceTabId),
+    Item(crate::workspace::ItemId),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RenameKind {
     Space,
@@ -175,8 +187,8 @@ impl PaletteCommand {
         (Self::ZoomOut, "Workspace: Zoom out interface", ""),
         (Self::TerminalZoomIn, "Workspace: Zoom in terminal", ""),
         (Self::TerminalZoomOut, "Workspace: Zoom out terminal", ""),
-        (Self::NewFreeTerminal, "Workspace: New free terminal session", ""),
-        (Self::NewFreeSurface, "Workspace: New free surface", ""),
+        (Self::NewFreeTerminal, "Workspace: New scratch terminal session", ""),
+        (Self::NewFreeSurface, "Workspace: New scratch surface", ""),
         (Self::CloseItem, "Pane: Close Active Item", "Cmd/Ctrl+W"),
         (Self::CloseAllItems, "Pane: Close All Items", ""),
         (Self::MoveLeft, "Pane: Move Active Item Left", ""),
@@ -216,6 +228,10 @@ pub struct WorkspaceWindow {
     terminal_mode: Mode,
     mode_focus_pending: bool,
     conversations: Entity<crate::conversations::Conversations>,
+    resume_error: Option<(EntityId, crate::workspace::ItemId, String)>,
+    /// The agent started most recently, marked "last used" until the app quits.
+    last_agent: Option<String>,
+    resume_owners: Vec<(conversations::ResumeLease, EntityId, crate::workspace::ItemId, bool)>,
     mode_transition: crate::mode::ModeTransition,
     catalog: Catalog,
     background_statuses: Vec<(String, chartr_plugin::BackgroundStatus)>,
@@ -230,7 +246,7 @@ pub struct WorkspaceWindow {
     terminal_search_generation: u64,
     terminal_search_target: Option<Entity<terminal::Terminal>>,
     rename_space: Option<EntityId>,
-    rename_group: Option<(EntityId, WorkspaceTabId)>,
+    rename_group: Option<(EntityId, RenameTarget)>,
     rename_window: Option<AnyWindowHandle>,
     rename_input: Entity<TextInput>,
     rename_query: String,
@@ -247,6 +263,25 @@ pub struct WorkspaceWindow {
     dismissed_errors: HashSet<ErrorNoticeKey>,
 }
 
+/// Forward workspace focus to its active content. Shared with fixture tests so
+/// they exercise the shipping focus listener without restoring user state.
+pub(crate) fn on_workspace_focus_in<T: 'static>(
+    focus: &FocusHandle,
+    window: &mut Window,
+    cx: &mut Context<T>,
+    mut forward: impl FnMut(&mut T, &mut Window, &mut Context<T>) + 'static,
+) {
+    let workspace_focus = focus.clone();
+    cx.on_focus_in(focus, window, move |this, window, cx| {
+        // Focus-in also fires for descendants and when a native popup returns
+        // activation to the window. Do not steal an inline editor's focus.
+        if workspace_focus.is_focused(window) {
+            forward(this, window, cx);
+        }
+    })
+    .detach();
+}
+
 impl WorkspaceWindow {
     pub fn new(
         cwd: PathBuf,
@@ -256,10 +291,9 @@ impl WorkspaceWindow {
     ) -> Self {
         Self::observe_background_status(cx);
         let focus = cx.focus_handle();
-        cx.on_focus_in(&focus, window, |this, window, cx| {
+        on_workspace_focus_in(&focus, window, cx, |this, window, cx| {
             this.focus_active_terminal(window, cx);
-        })
-        .detach();
+        });
         cx.observe_window_bounds(window, |this, window, cx| {
             this.capture_window_bounds(window);
             this.schedule_persistence(cx);
@@ -296,6 +330,12 @@ impl WorkspaceWindow {
             cx.notify();
         })
         .detach();
+        cx.on_focus_out(&rename_input.focus_handle(cx), window, |this, _, window, cx| {
+            if this.rename_window.is_none() && this.inline_rename_rows().is_some() {
+                this.cancel_rename(window, cx);
+            }
+        })
+        .detach();
         let (mut state, mut saved, state_restore_problem) =
             persistence::restore_state(crate::persistence::state_file());
         let mut state_problem = None;
@@ -317,7 +357,8 @@ impl WorkspaceWindow {
             supervision_started: false,
             registry: None,
             spaces: Vec::new(),
-            space_sorter: chrome::sidebar::SpaceSorter::new(chrome::sidebar::CARD_GAP),
+            space_sorter: chrome::sidebar::SpaceSorter::new(chrome::sidebar::CARD_GAP)
+                .with_trailing(1),
             collapsed_spaces: HashSet::new(),
             pane_drop_preview: pane_drop_preview::PaneDropPreview::default(),
             active: None,
@@ -325,6 +366,9 @@ impl WorkspaceWindow {
             terminal_mode: saved.window.terminal_mode,
             mode_focus_pending: true,
             conversations,
+            resume_error: None,
+            last_agent: None,
+            resume_owners: Vec::new(),
             mode_transition: crate::mode::ModeTransition::default(),
             catalog: Catalog::default(),
             background_statuses: Vec::new(),
@@ -414,13 +458,13 @@ impl WorkspaceWindow {
             .or_else(std::env::home_dir)
             .filter(|path| path.is_absolute())
             .unwrap_or_else(|| cwd.clone());
-        descriptors.push(("Free sessions".to_owned(), home.clone(), SpaceKind::AdHoc));
+        descriptors.push(("Scratch".to_owned(), home.clone(), SpaceKind::AdHoc));
         if let Some(registry) = registry.as_ref() {
             descriptors.extend(
                 registry
                     .spaces()
                     .iter()
-                    // The synthetic Free sessions space already owns the home
+                    // The synthetic Scratch space already owns the home
                     // workspace. herdr has one workspace per directory, so a
                     // second row for the same path could not own independent
                     // sessions and would be a false distinction.
@@ -499,6 +543,7 @@ impl WorkspaceWindow {
 
     fn subscribe_to_space(space: &Entity<Space>, window: &mut Window, cx: &mut Context<Self>) {
         cx.observe_in(space, window, |this, space, window, cx| {
+            this.prune_resume_owners(cx);
             if this.active.as_ref() == Some(&space)
                 && this.focus.is_focused(window)
                 && this.command_palette_window.is_none()
@@ -731,7 +776,8 @@ impl WorkspaceWindow {
                     active: self.active.as_ref() == Some(space),
                     removable: read.kind() == SpaceKind::Registered,
                     available: read.available(),
-                    entries: read.entries(space.entity_id()),
+                    layouts: read.layouts(space.entity_id()),
+                    activity: read.activity(),
                 }
             })
             .collect()
@@ -745,6 +791,7 @@ impl WorkspaceWindow {
                     | Action::NewPluginPane
                     | Action::NewInSpace { .. }
                     | Action::NewPluginPaneInSpace { .. }
+                    | Action::NewSurfaceInSpace { .. }
             )
         {
             self.settings_set_mode(self.terminal_mode, cx);
@@ -754,6 +801,26 @@ impl WorkspaceWindow {
             Action::ToggleSpaceCollapsed { space } => {
                 if !self.collapsed_spaces.remove(&space) {
                     self.collapsed_spaces.insert(space);
+                }
+            }
+            Action::ActivateSpace { space } => {
+                if let Some(target) =
+                    self.spaces.iter().find(|candidate| candidate.entity_id() == space).cloned()
+                {
+                    // Picking a folded space opens it; other spaces keep their
+                    // state so rows don't jump around.
+                    self.collapsed_spaces.remove(&space);
+                    self.activate(target, window, cx);
+                    self.focus_active_terminal(window, cx);
+                }
+            }
+            Action::ActivateLayout { space, tab } => {
+                if let Some(target) =
+                    self.spaces.iter().find(|candidate| candidate.entity_id() == space).cloned()
+                    && target.update(cx, |space, cx| space.activate_layout(tab, cx))
+                {
+                    self.activate(target, window, cx);
+                    self.focus_active_terminal(window, cx);
                 }
             }
             Action::SwitchToTabs => self.settings_set_mode(Mode::Tabs, cx),
@@ -786,6 +853,24 @@ impl WorkspaceWindow {
                     });
                 }
             }
+            Action::NewSurfaceInSpace { space, key } => {
+                self.collapsed_spaces.remove(&space);
+                if let Some(target) =
+                    self.spaces.iter().find(|candidate| candidate.entity_id() == space).cloned()
+                {
+                    self.activate(target, window, cx);
+                    self.open_plugin_from_new_menu(key, window, cx);
+                }
+            }
+            Action::StartAgentInSpace { space, name } => {
+                if let Some(target) =
+                    self.spaces.iter().find(|candidate| candidate.entity_id() == space).cloned()
+                {
+                    self.collapsed_spaces.remove(&space);
+                    self.activate(target, window, cx);
+                    self.quick_agent_chat(name, cx);
+                }
+            }
             Action::NewInSpace { space } => {
                 self.collapsed_spaces.remove(&space);
                 if matches!(self.backend, Backend::Ready)
@@ -795,6 +880,24 @@ impl WorkspaceWindow {
                     self.activate(target.clone(), window, cx);
                     target.update(cx, |space, cx| space.start_session(cx));
                 }
+            }
+            Action::CloseOtherTabs { space, tab } => {
+                let Some(space) =
+                    self.spaces.iter().find(|candidate| candidate.entity_id() == space).cloned()
+                else {
+                    return;
+                };
+                let ids = {
+                    let space = space.read(cx);
+                    space
+                        .workspace_tabs()
+                        .tabs()
+                        .iter()
+                        .filter(|other| other.id != tab)
+                        .flat_map(|other| space.tab_item_ids(other.id))
+                        .collect()
+                };
+                self.request_bulk_close(space, ids, false, "tabs", window, cx);
             }
             Action::CloseGroup { space, tab } => {
                 let Some(space) =
@@ -812,14 +915,38 @@ impl WorkspaceWindow {
                     space.update(cx, |space, _| space.ungroup_pane(tab));
                 }
             }
+            Action::CommitRename => {
+                if self.rename_group.is_some() {
+                    self.commit_group_rename(window, cx);
+                } else if self.rename_space.is_some() {
+                    self.commit_space_rename(window, cx);
+                }
+            }
+            Action::CancelRename => self.cancel_rename(window, cx),
             Action::RenameGroup { space, tab } => {
                 if let Some(target) =
                     self.spaces.iter().find(|candidate| candidate.entity_id() == space).cloned()
                 {
                     self.rename_space = None;
-                    self.rename_group = Some((space, tab));
+                    self.rename_group = Some((space, RenameTarget::Tab(tab)));
                     self.rename_query =
-                        target.read(cx).group_name(tab).unwrap_or_default().to_owned();
+                        target.read(cx).tab_name(tab).unwrap_or_default().to_owned();
+                    self.rename_input.update(cx, |input, cx| {
+                        input.set_text(self.rename_query.clone(), true, cx)
+                    });
+                    self.open_rename_window(RenameKind::Group, window, cx);
+                }
+            }
+            Action::RenameItem { space, item } => {
+                let target = space
+                    .and_then(|id| self.spaces.iter().find(|space| space.entity_id() == id))
+                    .or(self.active.as_ref())
+                    .cloned();
+                if let Some(target) = target {
+                    let title = target.read(cx).item_title(item).unwrap_or_default();
+                    self.rename_space = None;
+                    self.rename_group = Some((target.entity_id(), RenameTarget::Item(item)));
+                    self.rename_query = title;
                     self.rename_input.update(cx, |input, cx| {
                         input.set_text(self.rename_query.clone(), true, cx)
                     });
@@ -831,6 +958,7 @@ impl WorkspaceWindow {
                     self.spaces.iter().find(|candidate| candidate.entity_id() == space).cloned()
                 {
                     space.update(cx, |space, _| space.move_workspace_tab(tab, target_index));
+                    cx.notify();
                 }
             }
             Action::CloseSpace { space } => self.request_close_space(space, window, cx),
@@ -1024,27 +1152,35 @@ impl WorkspaceWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let terminal_count = space
-            .read(cx)
-            .close_targets(&ids)
-            .iter()
-            .filter(|(_, backend)| backend.is_some())
-            .count();
+        let targets = space.read(cx).close_targets(&ids);
+        let terminal_count = targets.iter().filter(|(_, backend)| backend.is_some()).count();
         if terminal_count <= 1 {
             self.start_bulk_close(space, ids, remove_space, cx);
             return;
         }
 
-        let message = format!("Close this {noun} and terminate {terminal_count} sessions?");
-        let detail =
-            "Closing is destructive: every underlying shell or agent process is terminated.";
-        let prompt = window.prompt(
-            gpui::PromptLevel::Critical,
-            &message,
-            Some(detail),
-            &["Close and Terminate", "Cancel"],
-            cx,
-        );
+        let (message, detail, buttons) = if remove_space {
+            let space = space.read(cx);
+            let titles: Vec<_> = targets
+                .iter()
+                .filter(|(_, backend)| backend.is_some())
+                .filter_map(|(id, _)| space.item(*id).map(|item| item.title()))
+                .collect();
+            (
+                format!("Close \"{}\"?", space.name()),
+                close_space_detail(terminal_count, &titles),
+                ["Close Space", "Cancel"],
+            )
+        } else {
+            (
+                format!("Close this {noun} and terminate {terminal_count} sessions?"),
+                "Closing is destructive: every underlying shell or agent process is terminated."
+                    .to_owned(),
+                ["Close and Terminate", "Cancel"],
+            )
+        };
+        let prompt =
+            window.prompt(gpui::PromptLevel::Critical, &message, Some(&detail), &buttons, cx);
         cx.spawn(async move |this, cx| {
             if prompt.await == Ok(0) {
                 let _ =
@@ -1273,6 +1409,46 @@ impl WorkspaceWindow {
             cx.notify();
             return;
         }
+    }
+}
+
+fn close_space_detail(count: usize, titles: &[String]) -> String {
+    let mut detail = format!("Ends {count} running sessions");
+    if titles.len() == count {
+        detail.push_str(": ");
+        detail.push_str(&titles.iter().take(4).cloned().collect::<Vec<_>>().join(", "));
+        if count > 4 {
+            detail.push_str(&format!(", and {} more", count - 4));
+        }
+    }
+    detail.push_str(". The folder is not changed.");
+    detail
+}
+
+#[cfg(test)]
+mod close_space_detail_tests {
+    use super::close_space_detail;
+
+    #[test]
+    fn lists_two_titles() {
+        let titles = vec!["Shell".into(), "Agent".into()];
+        assert_eq!(
+            close_space_detail(2, &titles),
+            "Ends 2 running sessions: Shell, Agent. The folder is not changed."
+        );
+    }
+
+    #[test]
+    fn limits_titles_to_four_and_counts_the_rest() {
+        let titles = (1..=6).map(|n| format!("Session {n}")).collect::<Vec<_>>();
+        assert_eq!(
+            close_space_detail(6, &titles),
+            "Ends 6 running sessions: Session 1, Session 2, Session 3, Session 4, and 2 more. The folder is not changed."
+        );
+        assert_eq!(
+            close_space_detail(2, &titles[..1]),
+            "Ends 2 running sessions. The folder is not changed."
+        );
     }
 }
 

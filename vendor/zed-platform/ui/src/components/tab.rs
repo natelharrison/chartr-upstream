@@ -5,7 +5,7 @@ use smallvec::SmallVec;
 
 use crate::prelude::*;
 
-const START_TAB_SLOT_SIZE: Pixels = px(12.);
+const START_TAB_SLOT_SIZE: Pixels = px(16.);
 const END_TAB_SLOT_SIZE: Pixels = px(14.);
 
 /// The position of a [`Tab`] within a list of tabs.

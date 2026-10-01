@@ -167,6 +167,26 @@ pub struct InboxLaunch {
     pub integration: Option<String>,
 }
 
+type ResumeInput = dyn Fn(&str, &str, &gpui::App) -> Result<crate::TerminalLaunch, String>;
+
+/// Prepare a provider resume using the registered agent launcher, not a default executable.
+pub struct ResumeAgents(Box<ResumeInput>);
+impl ResumeAgents {
+    pub fn new(
+        prepare: impl Fn(&str, &str, &gpui::App) -> Result<crate::TerminalLaunch, String> + 'static,
+    ) -> Self {
+        Self(Box::new(prepare))
+    }
+    pub fn prepare(
+        &self,
+        provider: &str,
+        argument: &str,
+        cx: &gpui::App,
+    ) -> Result<crate::TerminalLaunch, String> {
+        (self.0)(provider, argument, cx)
+    }
+}
+
 type InboxInput = dyn Fn(&str, &gpui::App) -> Result<InboxLaunch, String>;
 pub struct InboxAgents(Box<InboxInput>);
 impl InboxAgents {

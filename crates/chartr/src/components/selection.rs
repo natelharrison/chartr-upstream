@@ -7,8 +7,8 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Div, ElementId, Hsla, IntoElement, ParentElement,
-    RenderOnce, Role, SharedString, Window, canvas, point, px, size,
+    AnyElement, App, Bounds, ClickEvent, Div, ElementId, IntoElement, ParentElement, RenderOnce,
+    Role, SharedString, Window, canvas, point, px, size,
 };
 use ui::{ButtonSize, prelude::*};
 
@@ -46,8 +46,9 @@ impl SegmentedControlOption {
     }
 }
 
-/// A radio-like picker with one inset selection pill inside a shared outline.
-/// The pill follows the selected option's measured position and width.
+/// A radio-like picker drawn as divided cells, like pane tabs: the chosen cell
+/// takes the pane surface color and the others sit on the tab-strip color.
+/// The fill follows the selected option's measured position and width.
 #[derive(IntoElement)]
 pub struct SegmentedControl {
     label: SharedString,
@@ -55,6 +56,7 @@ pub struct SegmentedControl {
     disabled: bool,
     full_width: bool,
     list_row: bool,
+    soft_inset: bool,
 }
 
 impl SegmentedControl {
@@ -68,6 +70,7 @@ impl SegmentedControl {
             disabled: false,
             full_width: false,
             list_row: false,
+            soft_inset: false,
         }
     }
 
@@ -82,13 +85,20 @@ impl SegmentedControl {
         self
     }
 
+    /// Soft rounded choices used only by the workspace-mode switch.
+    pub fn soft_inset(mut self) -> Self {
+        self.soft_inset = true;
+        self
+    }
+
     pub fn full_width(mut self) -> Self {
         self.full_width = true;
         self
     }
 }
 
-const PILL_INSET: f32 = 2.;
+// Cells fill the outline edge to edge; dividers separate them.
+const PILL_INSET: f32 = 0.;
 const PILL_DURATION: Duration = Duration::from_millis(250);
 
 #[derive(Default)]
@@ -156,14 +166,25 @@ impl PillState {
 
 impl RenderOnce for SegmentedControl {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let inset = px(PILL_INSET);
+        let soft_inset = self.soft_inset;
+        let inset = if soft_inset { crate::design::MODE_SWITCH_INSET } else { px(PILL_INSET) };
         let vertical_padding = (selection_row_vertical_padding(window) - inset).max(px(0.));
-        let compact_height = ButtonSize::Default.rems().to_pixels(window.rem_size()) - inset * 2.;
-        let horizontal_padding = gpui::rems(if self.list_row { 0.625 } else { 0.75 })
-            .to_pixels(window.rem_size())
-            - inset;
-        let label_size =
-            if self.list_row { crate::fonts::UI_LABEL_DEFAULT } else { LabelSize::Small };
+        let compact_height = if soft_inset {
+            crate::design::ICON_BUTTON
+        } else {
+            ButtonSize::Default.rems().to_pixels(window.rem_size()) - inset * 2.
+        };
+        let horizontal_padding = if soft_inset {
+            px(8.)
+        } else {
+            gpui::rems(if self.list_row { 0.625 } else { 0.75 }).to_pixels(window.rem_size())
+                - inset
+        };
+        let label_size = if soft_inset || self.list_row {
+            crate::fonts::UI_LABEL_DEFAULT
+        } else {
+            LabelSize::Small
+        };
         let motion = window.use_keyed_state(self.label.clone(), cx, |_, _| {
             Rc::new(RefCell::new(PillState::default()))
         });
@@ -183,17 +204,32 @@ impl RenderOnce for SegmentedControl {
             self.options.iter().find(|option| option.selected).map(|option| option.id.clone());
         let colors = cx.theme().colors();
         let border = colors.border.opacity(0.8);
-        let selected_background = colors.ghost_element_selected;
+        let selected_background =
+            if soft_inset { colors.element_selected } else { colors.tab_active_background };
+        let hover_background = if soft_inset {
+            colors.text.opacity(crate::design::TINT_MODE_HOVER)
+        } else {
+            crate::design::hover_tint(cx)
+        };
+        let group_background = if soft_inset {
+            colors.text.opacity(crate::design::TINT_MODE_GROUP)
+        } else {
+            colors.tab_inactive_background
+        };
 
         h_flex()
             .id(self.label.clone())
             .relative()
             .role(Role::RadioGroup)
             .aria_label(self.label)
-            .rounded_md()
+            .rounded(if soft_inset {
+                crate::design::RADIUS_MENU
+            } else {
+                crate::design::RADIUS_CONTROL
+            })
             .overflow_hidden()
-            .border_1()
-            .border_color(border)
+            .when(!soft_inset, |control| control.border_1().border_color(border))
+            .bg(group_background)
             .p(inset)
             .gap(inset)
             .when(self.full_width, |control| control.w_full())
@@ -214,7 +250,9 @@ impl RenderOnce for SegmentedControl {
                         ) {
                             pill.origin += bounds.origin;
                             let mut quad = gpui::fill(pill, selected_background);
-                            quad.corner_radii = px(4.).into();
+                            if soft_inset {
+                                quad.corner_radii = crate::design::RADIUS_CONTROL.into();
+                            }
                             window.paint_quad(quad);
                             if animating {
                                 window.request_animation_frame();
@@ -225,7 +263,7 @@ impl RenderOnce for SegmentedControl {
                 .absolute()
                 .inset_0(),
             )
-            .children(self.options.into_iter().map(|option| {
+            .children(self.options.into_iter().enumerate().map(|(index, option)| {
                 let selected = option.selected;
                 let hovered = hovered_option.read(cx).as_ref() == Some(&option.id);
                 let hover_state = hovered_option.clone();
@@ -244,6 +282,9 @@ impl RenderOnce for SegmentedControl {
                         |item| item.h(compact_height),
                     )
                     .px(horizontal_padding)
+                    .when(!soft_inset && index > 0, |item| item.border_l_1().border_color(border))
+                    .when(soft_inset, |item| item.rounded(crate::design::RADIUS_CONTROL))
+                    .when(hovered && !selected && !self.disabled, |item| item.bg(hover_background))
                     .when(self.full_width, |item| item.flex_1().min_w_0().justify_center())
                     .when(selected, |item| {
                         item.child(
@@ -298,13 +339,6 @@ impl RenderOnce for SegmentedControl {
     }
 }
 
-/// Optional state surfaces for a selection row embedded on a custom ground.
-#[derive(Debug, Clone, Copy)]
-pub struct SelectionRowBackgrounds {
-    pub hover: Hsla,
-    pub selected: Hsla,
-}
-
 #[derive(IntoElement)]
 pub struct SelectionRow {
     id: ElementId,
@@ -314,7 +348,6 @@ pub struct SelectionRow {
     on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
     start_slot: Option<AnyElement>,
     end_slot: Option<AnyElement>,
-    backgrounds: Option<SelectionRowBackgrounds>,
     children: Vec<AnyElement>,
 }
 
@@ -328,7 +361,6 @@ impl SelectionRow {
             on_click: None,
             start_slot: None,
             end_slot: None,
-            backgrounds: None,
             children: Vec::new(),
         }
     }
@@ -360,11 +392,6 @@ impl SelectionRow {
         self.end_slot = slot.into().map(IntoElement::into_any_element);
         self
     }
-
-    pub fn backgrounds(mut self, backgrounds: SelectionRowBackgrounds) -> Self {
-        self.backgrounds = Some(backgrounds);
-        self
-    }
 }
 
 impl ParentElement for SelectionRow {
@@ -382,14 +409,11 @@ impl RenderOnce for SelectionRow {
         let vertical_padding = selection_row_vertical_padding(window);
         let has_end_slot = self.end_slot.is_some();
         let colors = cx.theme().colors();
-        let (selected_background, hover_background, active_background) = if let Some(backgrounds) =
-            self.backgrounds
-        {
-            let interaction = if self.selected { backgrounds.selected } else { backgrounds.hover };
-            (backgrounds.selected, interaction, interaction)
-        } else {
-            (colors.ghost_element_selected, colors.ghost_element_hover, colors.ghost_element_active)
-        };
+        let (selected_background, hover_background, active_background) = (
+            colors.ghost_element_selected,
+            colors.ghost_element_hover,
+            colors.ghost_element_active,
+        );
 
         h_flex()
             .id(self.id)
@@ -490,12 +514,122 @@ mod tests {
         }
     }
 
+    struct SoftPickerHarness {
+        selected: usize,
+        disabled: bool,
+    }
+
+    impl Render for SoftPickerHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            h_flex().items_start().child(
+                SegmentedControl::new(
+                    "Soft mode picker",
+                    ["Tabs", "Spaces", "Chats"].into_iter().enumerate().map(|(index, label)| {
+                        SegmentedControlOption::new(
+                            label,
+                            label,
+                            self.selected == index,
+                            cx.listener(move |this, _, _, cx| {
+                                this.selected = index;
+                                cx.notify();
+                            }),
+                        )
+                    }),
+                )
+                .soft_inset()
+                .disabled(self.disabled),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn soft_mode_picker_rounds_each_choice_without_changing_divided_controls(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            ::settings::init(cx);
+            theme::init(theme::LoadThemes::JustBase, cx);
+            crate::fonts::install(&crate::settings::ResolvedSettings::default(), cx);
+            cx.set_reduce_motion(true);
+        });
+        let (view, cx) =
+            cx.add_window_view(|_, _| SoftPickerHarness { selected: 0, disabled: false });
+        cx.simulate_mouse_move(point(px(500.), px(100.)), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let geometry = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                let colors = cx.theme().colors();
+                let quads = window.painted_quads();
+                let group = quads
+                    .iter()
+                    .find(|q| {
+                        q.background == colors.text.opacity(crate::design::TINT_MODE_GROUP).into()
+                    })
+                    .expect("soft group");
+                let selected = quads
+                    .iter()
+                    .find(|q| q.background == colors.element_selected.into())
+                    .expect("rounded selection");
+                let scale = window.scale_factor();
+                assert_eq!(group.bounds.size.height.as_f32() / scale, 28.);
+                assert_eq!(selected.bounds.size.height.as_f32() / scale, 24.);
+                assert_eq!(group.corner_radii.top_left.as_f32() / scale, 8.);
+                assert_eq!(selected.corner_radii.top_left.as_f32() / scale, 6.);
+                assert_eq!(selected.corner_radii.bottom_right.as_f32() / scale, 6.);
+                assert!(
+                    quads.iter().all(|q| q.border_widths.left.as_f32() == 0.
+                        && q.border_widths.right.as_f32() == 0.
+                        && q.border_widths.top.as_f32() == 0.
+                        && q.border_widths.bottom.as_f32() == 0.),
+                    "no outer border or cell dividers"
+                );
+                let logical = |b: gpui::Bounds<gpui::ScaledPixels>| {
+                    Bounds::new(
+                        point(px(b.origin.x.as_f32() / scale), px(b.origin.y.as_f32() / scale)),
+                        size(px(b.size.width.as_f32() / scale), px(b.size.height.as_f32() / scale)),
+                    )
+                };
+                (logical(group.bounds), logical(selected.bounds))
+            })
+        };
+        let (group, first) = geometry(cx);
+        assert_eq!(first.left(), group.left() + crate::design::MODE_SWITCH_INSET);
+        assert_eq!(first.top(), group.top() + crate::design::MODE_SWITCH_INSET);
+        let next = point(first.right() + px(20.), first.center().y);
+        cx.simulate_mouse_move(next, None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let hover = cx.theme().colors().text.opacity(crate::design::TINT_MODE_HOVER);
+            let scale = window.scale_factor();
+            let quads = window.painted_quads();
+            let q = quads.iter().find(|q| q.background == hover.into()).expect("neutral hover");
+            assert_eq!(q.corner_radii.top_left.as_f32() / scale, 6.);
+        });
+        cx.simulate_click(next, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |view, _| view.selected), 1);
+        let (_, second) = geometry(cx);
+        assert_eq!(second.left() - first.right(), crate::design::MODE_SWITCH_INSET);
+        assert_eq!(second.top(), first.top());
+        view.update(cx, |view, cx| {
+            view.disabled = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_click(first.center(), gpui::Modifiers::none());
+        assert_eq!(
+            view.read_with(cx, |view, _| view.selected),
+            1,
+            "disabled choice cannot activate"
+        );
+    }
+
     fn painted_pill(cx: &mut gpui::VisualTestContext) -> Bounds<Pixels> {
         cx.update(|window, cx| {
             let pills: Vec<_> = window
                 .painted_quads()
                 .into_iter()
-                .filter(|quad| quad.background == cx.theme().colors().ghost_element_selected.into())
+                .filter(|quad| quad.background == cx.theme().colors().tab_active_background.into())
                 .collect();
             assert_eq!(pills.len(), 1, "one continuous selection pill");
             let bounds = pills[0].bounds;
@@ -528,7 +662,11 @@ mod tests {
             let bounds = window
                 .painted_quads()
                 .into_iter()
-                .find(|quad| quad.border_color == cx.theme().colors().border.opacity(0.8))
+                // Dividers share the outline color; the outline is the widest.
+                .filter(|quad| quad.border_color == cx.theme().colors().border.opacity(0.8))
+                .max_by(|a, b| {
+                    a.bounds.size.width.as_f32().total_cmp(&b.bounds.size.width.as_f32())
+                })
                 .unwrap()
                 .bounds;
             let scale = window.scale_factor();
@@ -550,9 +688,15 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(
             cx.update(|window, _| window.painted_quads().len()),
-            resting_quads,
-            "hover changes text emphasis without painting a background",
+            resting_quads + 1,
+            "hover fills only the hovered cell with the shared tint",
         );
+        assert!(cx.update(|window, cx| {
+            window
+                .painted_quads()
+                .iter()
+                .any(|quad| quad.background == crate::design::hover_tint(cx).into())
+        }));
         cx.simulate_click(
             point(first.right() + px(25.), first.center().y),
             gpui::Modifiers::none(),
@@ -571,7 +715,8 @@ mod tests {
         assert!(first.left() < midway.left() && midway.left() < second.left());
         assert!(first.size.width < midway.size.width && midway.size.width < second.size.width);
         assert_eq!(first.size.height, second.size.height);
-        assert_eq!(second.left() - first.right(), px(PILL_INSET));
+        // The next fill starts after the 1px divider between cells.
+        assert_eq!(second.left() - first.right(), px(PILL_INSET + 1.));
         assert_eq!(first.top() - outer.top() - px(1.), px(PILL_INSET));
         assert_eq!(outer.bottom() - first.bottom() - px(1.), px(PILL_INSET));
         assert_eq!(first.left() - outer.left() - px(1.), px(PILL_INSET));
@@ -637,7 +782,7 @@ mod tests {
             let pill = painted_pill(cx);
             let option_width = first.size.width + px((width - 240.) / 2.);
             assert_eq!(pill.size.width, option_width);
-            assert_eq!(pill.left(), first.left() + option_width + px(PILL_INSET));
+            assert_eq!(pill.left(), first.left() + option_width + px(PILL_INSET + 1.));
         }
     }
 

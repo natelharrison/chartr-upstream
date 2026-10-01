@@ -1,12 +1,19 @@
 # Installation
 
+> **Personal-fork note:** The packages and platform support described below
+> belong to upstream Chartr, not this customized fork. This fork has only been
+> tested on macOS; Linux and Windows are unverified, and the changed Tabs and
+> Chats modes still need end-to-end testing. Build from this fork's checkout
+> using the [Daily build guide](daily-app-build-and-verify.md) to get its changes.
+> The upstream clone command below is for upstream, not this fork.
+
 The [v0.3.0 release](https://github.com/rengwu/chartr/releases/tag/v0.3.0)
 provides stable packages for the Rust rewrite.
 The [v0.2.4 downloads](https://github.com/rengwu/chartr/releases/tag/v0.2.4) remain
 available for the legacy Go/Svelte app. You can also build a
 [development DMG](releasing.md#macos-development-dmg) locally on macOS.
 
-| Platform | Current support                                                    |
+| Platform | Upstream support                                                    |
 | -------- | ------------------------------------------------------------------ |
 | macOS    | Native desktop app for Apple silicon.                             |
 | Linux    | Native desktop app under X11 or XWayland; CI runs on Ubuntu 24.04. |

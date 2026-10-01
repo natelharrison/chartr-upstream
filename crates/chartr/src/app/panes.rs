@@ -3,6 +3,7 @@
 use super::*;
 use crate::chrome::tab_sorter::{SortableTab, SortableTabList};
 use crate::components::SortAxis;
+use ui::TabBar;
 
 impl WorkspaceWindow {
     fn pane_new_item_button(
@@ -34,32 +35,87 @@ impl WorkspaceWindow {
         )
     }
 
-    fn pane_new_plugin_button(
+    /// The same create menu as a space row, but terminals and surfaces open
+    /// in this pane rather than the space's active one.
+    fn pane_create_menu(
         &self,
         tab_id: WorkspaceTabId,
         pane_id: LayoutPaneId,
         weak: &gpui::WeakEntity<Self>,
+        cx: &App,
     ) -> AnyElement {
-        let button_id = format!("new-plugin-pane-{}-{}", tab_id.get(), pane_id.get());
-        let open = weak.clone();
-        let button = chrome::new_plugin_pane_button(button_id.clone(), IconSize::Small)
-            .on_click(move |_, _, cx| {
-                cx.stop_propagation();
-                let _ = open.update(cx, |this, cx| {
-                    if let Some(space) = this.active.clone() {
-                        space.update(cx, |space, cx| {
-                            space.open_plugin_launcher_in(tab_id, pane_id, cx);
-                        });
-                    }
-                });
+        let Some(space) = self.active.as_ref().map(Entity::entity_id) else {
+            return div().into_any_element();
+        };
+        let agents = self.agent_choices(cx);
+        let surfaces = self.surface_options();
+        let route = weak.clone();
+        let on: chrome::Emit = Rc::new(move |action, window, cx| {
+            let _ = route.update(cx, |this, cx| {
+                this.act_in_pane(action, tab_id, pane_id, window, cx);
+            });
+        });
+        PopupMenu::new(format!("new-in-pane-{}-{}", tab_id.get(), pane_id.get()))
+            .trigger_with_tooltip(
+                ButtonLike::new(format!("new-in-pane-trigger-{}-{}", tab_id.get(), pane_id.get()))
+                    .width(px(24.))
+                    .height(px(24.).into())
+                    .size(ButtonSize::None)
+                    .aria_label("Add to pane")
+                    .child(
+                        Icon::from_path(crate::assets::PLUGIN_LAUNCHER_ICON_PATH)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    ),
+                Tooltip::text("Start agent or surface"),
+            )
+            .menu(move |window, cx| {
+                let on = on.clone();
+                let agents = agents.clone();
+                let surfaces = surfaces.clone();
+                Some(ContextMenu::build_popup(window, cx, move |menu| {
+                    chrome::create_menu(menu, space, &agents, &surfaces, on)
+                }))
             })
-            .into_any_element();
-        chrome::new_item_drag_handle(
-            button_id,
-            self.active.as_ref().map(Entity::entity_id),
-            chrome::NewItemKind::Plugin,
-            button,
-        )
+            .into_any_element()
+    }
+
+    fn act_in_pane(
+        &mut self,
+        action: Action,
+        tab: WorkspaceTabId,
+        pane: LayoutPaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(space) = self.active.clone() else {
+            return self.act(action, window, cx);
+        };
+        match action {
+            Action::NewInSpace { .. } => {
+                if matches!(self.backend, Backend::Ready) {
+                    space.update(cx, |space, cx| space.start_session_in(tab, pane, cx));
+                }
+            }
+            Action::NewPluginPaneInSpace { .. } => {
+                space.update(cx, |space, cx| {
+                    space.open_plugin_launcher_in(tab, pane, cx);
+                });
+            }
+            Action::NewSurfaceInSpace { key, .. } => {
+                if !self.catalog.panes().iter().any(|surface| surface.key == key) {
+                    self.problem =
+                        Some("That plugin contribution is no longer available.".to_owned());
+                    cx.notify();
+                    return;
+                }
+                let launcher =
+                    space.update(cx, |space, cx| space.open_plugin_launcher_in(tab, pane, cx));
+                self.open_plugin_from_launcher(launcher, key, window, cx);
+            }
+            other => self.act(other, window, cx),
+        }
+        cx.notify();
     }
 
     fn pane_new_item_cell(
@@ -71,9 +127,9 @@ impl WorkspaceWindow {
     ) -> AnyElement {
         chrome::new_item_cell(
             h_flex()
-                .gap_px()
+                .gap(px(2.))
                 .child(self.pane_new_item_button(tab_id, pane_id, weak))
-                .child(self.pane_new_plugin_button(tab_id, pane_id, weak)),
+                .child(self.pane_create_menu(tab_id, pane_id, weak, cx)),
             cx,
         )
     }
@@ -196,7 +252,10 @@ impl WorkspaceWindow {
         let weak = cx.weak_entity();
         let workspace = if let Some(tab) = space.workspace_tabs().active_tab() {
             let layout = &tab.layout;
-            let show_pane_headers = tab.is_grouped();
+            // Pane-local tabs and creation controls remain available even
+            // before the pane is split. Each header is built from that pane's
+            // own item list, so tiling never leaks tabs across pane bars.
+            let show_pane_headers = true;
             self.render_member(
                 &space,
                 tab.id,
@@ -356,48 +415,49 @@ impl WorkspaceWindow {
                 self.empty_pane_header(tab_id, pane_id, weak, cx)
             }
         });
-        let content =
-            pane.active()
-                .and_then(|id| space.item(id).map(|item| (id, item)))
-                .map(|(id, item)| match item {
-                    crate::item::Item::Session(item) => {
-                        let Some(terminal_view) = item.terminal_view() else {
-                            return message("Starting terminal…", cx).into_any_element();
-                        };
-                        let terminal = crate::terminal_host::element(
-                            terminal_view,
-                            cx.theme().colors().terminal_background,
-                        );
-                        let ended = item.session.ended();
-                        let retrying = space.reattaching(id);
-                        let retry = weak.clone();
-                        v_flex()
-                            .relative()
-                            .size_full()
-                            .child(terminal)
-                            .when_some(ended, |view, ended| {
-                                let detail = match &ended {
+        let content = pane
+            .active()
+            .and_then(|id| space.item(id).map(|item| (id, item)))
+            .map(|(id, item)| match item {
+                crate::item::Item::Session(item) => {
+                    let Some(terminal_view) = item.terminal_view() else {
+                        return message("Starting terminal…", cx).into_any_element();
+                    };
+                    let terminal = crate::terminal_host::element(
+                        terminal_view,
+                        cx.theme().colors().terminal_background,
+                    );
+                    let ended = item.session.ended();
+                    let retrying = space.reattaching(id);
+                    let retry = weak.clone();
+                    v_flex()
+                        .relative()
+                        .size_full()
+                        .child(terminal)
+                        .when_some(ended, |view, ended| {
+                            let detail = match &ended {
                                 crate::session::Ended::Closed => {
                                     "Session ended. Close this tab when you are done reviewing it."
                                         .to_owned()
                                 }
                             };
-                                view.child(
-                                    div().absolute().left_2().right_2().bottom_2().child(
-                                        Banner::new()
-                                            .severity(Severity::Error)
-                                            .child(Label::new(detail).size(UI_LABEL_DEFAULT))
-                                            .action_slot(
-                                                Button::new(
-                                                    format!("reattach-session-{}", id.get()),
-                                                    if retrying {
-                                                        "Reattaching…"
-                                                    } else {
-                                                        "Reattach"
-                                                    },
-                                                )
-                                                .disabled(retrying)
-                                                .on_click(move |_, _, cx| {
+                            view.child(
+                                div().absolute().left_2().right_2().bottom_2().child(
+                                    Banner::new()
+                                        .severity(Severity::Error)
+                                        .child(Label::new(detail).size(UI_LABEL_DEFAULT))
+                                        .action_slot(
+                                            Button::new(
+                                                format!("reattach-session-{}", id.get()),
+                                                if retrying {
+                                                    "Reattaching…"
+                                                } else {
+                                                    "Reattach"
+                                                },
+                                            )
+                                            .disabled(retrying)
+                                            .on_click(
+                                                move |_, _, cx| {
                                                     let _ = retry.update(cx, |this, cx| {
                                                         if let Some(space) = this.active.clone() {
                                                             space.update(cx, |space, cx| {
@@ -405,20 +465,107 @@ impl WorkspaceWindow {
                                                             });
                                                         }
                                                     });
-                                                }),
+                                                },
                                             ),
-                                    ),
-                                )
-                            })
-                            .into_any_element()
-                    }
-                    crate::item::Item::Plugin(item) => item.view.clone_view().into_any_element(),
-                    crate::item::Item::PluginLauncher { .. } => self.plugin_launcher(id, weak, cx),
-                })
-                .unwrap_or_else(|| {
-                    empty_pane_message("Drop a tab here or create a new item.", cx)
+                                        ),
+                                ),
+                            )
+                        })
                         .into_any_element()
-                });
+                }
+                crate::item::Item::Ended(recovery) => {
+                    let reason = if recovery.agent.is_none() {
+                        None
+                    } else if recovery.native.is_none() {
+                        Some("No native session ID was recorded.")
+                    } else if let Some(provider) =
+                        recovery.agent.as_deref().and_then(chartr_conversations::Provider::detect)
+                    {
+                        if !matches!(
+                            provider,
+                            chartr_conversations::Provider::Pi
+                                | chartr_conversations::Provider::Claude
+                                | chartr_conversations::Provider::Codex
+                        ) {
+                            Some("This agent does not support resume here.")
+                        } else if chartr_conversations::ProviderPaths::from_environment()
+                            .session_log(provider, recovery.native.as_ref().unwrap())
+                            .is_err()
+                        {
+                            Some("The transcript is missing.")
+                        } else {
+                            None
+                        }
+                    } else {
+                        Some("The agent is unknown.")
+                    };
+                    let resume_error =
+                        self.resume_error.as_ref().and_then(|(owner, item, error)| {
+                            (Some(*owner) == measured_space
+                                && *item == id
+                                && Some(error.as_str()) != reason)
+                                .then(|| error.clone())
+                        });
+                    let resume = weak.clone();
+                    let shell = weak.clone();
+                    let dismiss = weak.clone();
+                    v_flex()
+                        .size_full()
+                        .justify_center()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            Label::new("Ended when the terminal server restarted")
+                                .size(UI_LABEL_DEFAULT),
+                        )
+                        .when_some(reason, |view, reason| {
+                            view.child(Label::new(reason).size(UI_LABEL_DEFAULT))
+                        })
+                        .when_some(resume_error, |view, error| {
+                            view.child(Label::new(error).size(UI_LABEL_DEFAULT))
+                        })
+                        .when(recovery.agent.is_some() && reason.is_none(), |view| {
+                            view.child(
+                                Button::new(format!("resume-ended-{}", id.get()), "Resume")
+                                    .on_click(move |_, _, cx| {
+                                        let _ =
+                                            resume.update(cx, |this, cx| this.resume_ended(id, cx));
+                                    }),
+                            )
+                        })
+                        .child(
+                            Button::new(format!("shell-ended-{}", id.get()), "Open shell here")
+                                .on_click(move |_, _, cx| {
+                                    let _ = shell.update(cx, |this, cx| {
+                                        if let Some(space) = this.active.clone() {
+                                            space.update(cx, |space, cx| {
+                                                space.reopen_ended(id, None, cx).detach();
+                                            });
+                                        }
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new(format!("dismiss-ended-{}", id.get()), "Dismiss").on_click(
+                                move |_, _, cx| {
+                                    let _ = dismiss.update(cx, |this, cx| {
+                                        if let Some(space) = this.active.clone() {
+                                            space.update(cx, |space, cx| {
+                                                space.dismiss_ended(id, cx)
+                                            });
+                                        }
+                                    });
+                                },
+                            ),
+                        )
+                        .into_any_element()
+                }
+                crate::item::Item::Plugin(item) => item.view.clone_view().into_any_element(),
+                crate::item::Item::PluginLauncher { .. } => self.plugin_launcher(id, weak, cx),
+            })
+            .unwrap_or_else(|| {
+                empty_pane_message("Drop a tab here or create a new item.", cx).into_any_element()
+            });
 
         let drag_move = weak.clone();
         let drop_item = weak.clone();
@@ -635,6 +782,7 @@ impl WorkspaceWindow {
                 let select_item = on.clone();
                 let close_item = on.clone();
                 let middle_close_item = on.clone();
+                let menu_item = on.clone();
                 let drop_item = weak.clone();
                 let drop_space = space_key.clone();
                 let dragged = DraggedItem {
@@ -661,9 +809,8 @@ impl WorkspaceWindow {
                 .into_any_element();
                 let tab = chrome::ItemTab::new(
                     format!("pane-{}-item-{}", pane_id.get(), id.get()),
-                    item.title(),
+                    space.item_title(*id).unwrap_or_else(|| item.title()),
                     selected,
-                    position,
                     &space_key,
                     *id,
                 )
@@ -671,6 +818,7 @@ impl WorkspaceWindow {
                 .icon_path(item.icon_path())
                 .close_slot(Some(close_slot))
                 .build(cx)
+                .position(position)
                 .on_click(move |_, window, cx| {
                     select_item(Action::Select { space: None, item: select }, window, cx)
                 })
@@ -712,14 +860,19 @@ impl WorkspaceWindow {
                         this.handle_item_drop(&dragged, tab_id, pane_id, index, false, window, cx);
                     });
                 });
-                Some(SortableTab::new(dragged, selected, move |placement, _| {
-                    tab.position(chrome::tab_position(
-                        placement.index,
-                        placement.count,
-                        placement.active_index,
-                    ))
-                    .into_any_element()
-                }))
+                let tab = crate::components::popup_right_click_menu(format!(
+                    "pane-{}-item-{}-menu",
+                    pane_id.get(),
+                    id.get()
+                ))
+                .trigger(move |_, _, _| tab)
+                .menu(move |window, cx| {
+                    let on = menu_item.clone();
+                    ContextMenu::build_popup(window, cx, move |menu| {
+                        pane_tab_menu(menu, select, on)
+                    })
+                });
+                Some(SortableTab::new(dragged, move |_, _| tab.into_any_element()))
             })
             .collect();
         let append_drop = weak.clone();
@@ -941,4 +1094,22 @@ mod creation_drag_tests {
         cx.simulate_mouse_up(source, MouseButton::Left, gpui::Modifiers::none());
         assert_eq!(view.read_with(cx, |view, _| (view.clicks, view.drops.len())), (1, 0));
     }
+}
+
+/// The right-click menu for one tab inside a pane.
+fn pane_tab_menu(
+    menu: ContextMenu,
+    item: crate::workspace::ItemId,
+    on: chrome::Emit,
+) -> ContextMenu {
+    let rename = on.clone();
+    menu.entry("Rename Tab…", None, move |window, cx| {
+        rename(Action::RenameItem { space: None, item }, window, cx)
+    })
+    .with_icon(IconName::Pencil.path())
+    .separator()
+    .danger_entry("Close Tab", move |window, cx| {
+        on(Action::Close { space: None, item }, window, cx)
+    })
+    .with_icon(IconName::Close.path())
 }

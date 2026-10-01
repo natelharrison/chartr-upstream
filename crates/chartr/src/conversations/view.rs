@@ -1,13 +1,9 @@
 use super::*;
 use gpui::{AnyElement, Role, Window, div, px};
-use ui::{Button, CommonAnimationExt, IconButton, Tooltip, prelude::*};
+use ui::{Button, IconButton, Tooltip, prelude::*};
 
-use crate::components::{
-    SegmentedControl, SegmentedControlOption, SelectionRowBackgrounds, selection_list,
-    selection_row,
-};
-use crate::fonts::{UI_LABEL_DEFAULT, UI_LABEL_SMALL, UI_TEXT_DEFAULT};
-use crate::settings::sidebar_theme_colors;
+use crate::components::{SegmentedControl, SegmentedControlOption, selection_list};
+use crate::fonts::{UI_LABEL_SMALL, UI_TEXT_DEFAULT};
 
 impl Render for Conversations {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -95,27 +91,43 @@ impl Conversations {
             .min_h_0()
             .min_w_0()
             .text_size(UI_TEXT_DEFAULT)
-            .bg(colors.panel_background)
+            // Match the Spaces sidebar canvas so switching modes does not
+            // restore the square-edged panel behind the inset workspace.
+            .bg(colors.background)
             .child(
-                div().w_full().px_1p5().pb_3().flex_none().child(
-                    SegmentedControl::new(
-                        "Conversation history",
-                        [("history-inbox", "Inbox", false), ("history-archive", "Archive", true)]
-                            .map(|(id, label, archived)| {
-                                SegmentedControlOption::new(
-                                    id,
-                                    label,
-                                    self.show_archived == archived,
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.show_archived = archived;
-                                        cx.notify();
-                                    }),
-                                )
-                            }),
+                h_flex()
+                    .w_full()
+                    .px_1p5()
+                    .pb(px(10.))
+                    .gap_1()
+                    .flex_none()
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            SegmentedControl::new(
+                                "Conversation history",
+                                [
+                                    ("history-inbox", "Inbox", false),
+                                    ("history-archive", "Archive", true),
+                                ]
+                                .map(|(id, label, archived)| {
+                                    SegmentedControlOption::new(
+                                        id,
+                                        label,
+                                        self.show_archived == archived,
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.show_archived = archived;
+                                            cx.notify();
+                                        }),
+                                    )
+                                }),
+                            )
+                            .list_row()
+                            .full_width(),
+                        ),
                     )
-                    .list_row()
-                    .full_width(),
-                ),
+                    // The mockup has no heading row; starting a chat stays one
+                    // click away beside the Inbox/Archive switch.
+                    .child(self.agent_picker(false, cx)),
             )
             .child(self.flat_history(&rows, window, cx))
             .into_any_element()
@@ -131,32 +143,11 @@ impl Conversations {
             .flex_1()
             .min_h_0()
             .w_full()
-            .child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .px_2()
-                    .pb_2()
-                    .justify_between()
-                    .flex_none()
-                    .child(
-                        Label::new(if self.show_archived {
-                            "Archived chats"
-                        } else {
-                            "Recent chats"
-                        })
-                        .size(UI_LABEL_SMALL)
-                        .color(Color::Muted)
-                        .truncate(),
-                    )
-                    .when(!self.show_archived, |heading| {
-                        heading.child(self.agent_picker(false, cx))
-                    }),
-            )
             .child(crate::components::scrolling_list(
                 "history-scrollbar",
                 selection_list()
                     .id("history-rows")
+                    .gap(px(2.))
                     .flex_1()
                     .min_h_0()
                     .w_full()
@@ -187,13 +178,10 @@ impl Conversations {
             .into_any_element()
     }
 
+    /// Two lines, as in the mockup: the title, then a status dot with the
+    /// space and age. Quiet fills match the Spaces sidebar's selected layout.
     fn history_row(&self, row: &Conversation, cx: &Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
-        let sidebar_colors = sidebar_theme_colors(cx.theme());
-        let row_backgrounds = SelectionRowBackgrounds {
-            hover: sidebar_colors.session_hover,
-            selected: sidebar_colors.session_active,
-        };
         let id = row.id.clone();
         let title = row.display_title().to_owned();
         let space_label = self.space_label(row);
@@ -205,66 +193,87 @@ impl Conversations {
             row.cwd
                 .as_ref()
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "Free sessions".to_owned())
+                .unwrap_or_else(|| "Scratch".to_owned())
         );
         let is_selected = self.selected.as_deref() == Some(&id);
-        let provider_icon = crate::agent_icons::known_agent_icon(row.provider.name())
-            .unwrap_or(crate::agent_icons::GENERIC_AGENT_ICON);
-        let status = conversation_status(row);
-        div()
+        let hover = colors.text.opacity(0.03);
+        v_flex()
             .id(format!("history-row-{id}"))
             .w_full()
             .min_w_0()
             .flex_none()
-            // Match the space-mode session wrapper, including its reserved
-            // outline, so switching modes keeps the same row height and inset.
-            .rounded_sm()
+            .gap(px(2.))
+            .px(px(8.))
+            .py(px(6.))
+            .rounded(px(8.))
             .border_1()
             .border_color(if is_selected {
-                colors.border_selected
+                colors.border_variant
             } else {
                 gpui::transparent_black()
             })
+            .when(is_selected, |row| row.bg(colors.text.opacity(0.05)))
+            .when(!is_selected, |row| row.hover(move |style| style.bg(hover)))
+            .role(Role::Tab)
+            .aria_label(title.clone())
+            .aria_selected(is_selected)
+            .cursor_pointer()
             .tooltip(Tooltip::text(detail))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.new_agent = None;
+                this.new_space = None;
+                this.launch_runtime = None;
+                this.selected = Some(id.clone());
+                this.clear_terminal();
+                this.focus_terminal = true;
+                this.pending_runtime = None;
+                this.problem = None;
+                this.focus.focus(window, cx);
+                cx.emit(Event::SelectionChanged);
+                cx.notify();
+            }))
             .child(
-                selection_row(format!("history-{id}"), is_selected)
-                    .backgrounds(row_backgrounds)
-                    .aria_role(Role::Tab)
-                    .aria_label(title.clone())
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.new_agent = None;
-                        this.new_space = None;
-                        this.launch_runtime = None;
-                        this.selected = Some(id.clone());
-                        this.clear_terminal();
-                        this.focus_terminal = true;
-                        this.pending_runtime = None;
-                        this.problem = None;
-                        this.focus.focus(window, cx);
-                        cx.emit(Event::SelectionChanged);
-                        cx.notify();
-                    }))
-                    .start_slot(h_flex().size(px(12.)).flex_none().justify_center().child(
-                        Icon::from_path(provider_icon).size(IconSize::XSmall).color(Color::Muted),
-                    ))
-                    .child(Label::new(title).size(UI_LABEL_DEFAULT).truncate())
-                    .when_some(status, |row, status| row.child(status))
-                    .end_slot(
-                        Label::new(relative_time(row.updated))
-                            .size(UI_LABEL_SMALL)
-                            .color(Color::Muted)
-                            .flex_none(),
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(UI_TEXT_DEFAULT)
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(colors.text)
+                    .child(title),
+            )
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .gap(px(6.))
+                    .text_size(rems(0.75))
+                    .text_color(colors.text_placeholder)
+                    .child(conversation_status(row, cx))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(format!("{space_label} · {}", relative_time(row.updated))),
                     ),
             )
             .into_any_element()
     }
 
     fn conversation(&mut self, row: &Conversation, cx: &mut Context<Self>) -> AnyElement {
+        let provider_icon = crate::agent_icons::known_agent_icon(row.provider.name())
+            .unwrap_or(crate::agent_icons::GENERIC_AGENT_ICON);
         v_flex()
             .id("selected-conversation")
             .flex_1()
             .min_w_0()
             .h_full()
+            .child(crate::chrome::pane_bar("chat-pane-bar", cx).child(
+                crate::chrome::single_pane_tab(
+                    "chat-pane-tab",
+                    provider_icon.into(),
+                    row.display_title().to_owned(),
+                    cx,
+                ),
+            ))
             .child(if row.runtime.is_none() && self.terminal_view.is_none() {
                 v_flex()
                     .flex_1()
@@ -334,31 +343,26 @@ impl Conversations {
     }
 }
 
-// Use the same status glyphs as space rows, with no mark for idle or unknown chats.
-fn conversation_status(row: &Conversation) -> Option<AnyElement> {
-    let (icon, color, label) = match row.status {
-        Status::Working => (IconName::LoadCircle, Color::Accent, "Working"),
-        Status::Waiting => (IconName::DebugPause, Color::Warning, "Waiting for input"),
-        Status::Ended => (IconName::XCircle, Color::Error, "Session ended"),
-        Status::Idle | Status::Unknown => return None,
+/// A small status dot: teal while working, amber while it needs you, grey
+/// otherwise. Live states carry a faint halo, drawn as a translucent circle.
+fn conversation_status(row: &Conversation, cx: &App) -> AnyElement {
+    let status = cx.theme().status();
+    let (color, halo, label) = match row.status {
+        Status::Working => (status.success, true, "Working"),
+        Status::Waiting => (status.warning, true, "Waiting for input"),
+        Status::Ended => (cx.theme().colors().text_disabled, false, "Session ended"),
+        Status::Idle | Status::Unknown => (cx.theme().colors().text_disabled, false, "Idle"),
     };
-    let icon = Icon::new(icon).size(IconSize::XSmall).color(color);
-    let icon = if row.status == Status::Working {
-        icon.with_keyed_rotate_animation(format!("chat-working-status-{}", row.id), 2)
-            .into_any_element()
-    } else {
-        icon.into_any_element()
-    };
-    Some(
-        h_flex()
-            .id(format!("chat-status-{}", row.id))
-            .size(px(12.))
-            .flex_none()
-            .justify_center()
-            .tooltip(Tooltip::text(label))
-            .child(icon)
-            .into_any_element(),
-    )
+    h_flex()
+        .id(format!("chat-status-{}", row.id))
+        .size(px(12.))
+        .flex_none()
+        .justify_center()
+        .rounded_full()
+        .when(halo, |mark| mark.bg(color.opacity(0.11)))
+        .tooltip(Tooltip::text(label))
+        .child(div().size(px(6.)).rounded_full().bg(color))
+        .into_any_element()
 }
 
 fn relative_time(updated: u64) -> String {

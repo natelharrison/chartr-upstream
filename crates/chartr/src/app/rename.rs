@@ -3,12 +3,36 @@
 use super::*;
 
 impl WorkspaceWindow {
+    /// Inline placement is limited to labels actually visible in Spaces mode.
+    pub(super) fn inline_rename_rows(&self) -> Option<chrome::sidebar::RenameRows> {
+        if self.mode != Mode::Sidebar || self.rename_window.is_some() {
+            return None;
+        }
+        let tab = self.rename_group.as_ref().and_then(|(space, target)| match target {
+            RenameTarget::Tab(tab) => Some((*space, *tab)),
+            RenameTarget::Item(_) => None,
+        });
+        if self.rename_space.is_none() && tab.is_none() {
+            return None;
+        }
+        Some(chrome::sidebar::RenameRows {
+            space: self.rename_space,
+            tab,
+            input: self.rename_input.clone(),
+        })
+    }
+
     pub(super) fn open_rename_window(
         &mut self,
         kind: RenameKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.inline_rename_rows().is_some() {
+            window.focus(&self.rename_input.focus_handle(cx), cx);
+            cx.notify();
+            return;
+        }
         let owner = cx.weak_entity();
         let parent = window.window_handle();
         let input = self.rename_input.clone();
@@ -29,11 +53,23 @@ impl WorkspaceWindow {
         }
     }
 
-    fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn clear_rename_state(&mut self, cx: &mut Context<Self>) {
         self.rename_space = None;
         self.rename_group = None;
         self.rename_query.clear();
         self.rename_input.update(cx, |input, cx| input.clear(cx));
+    }
+
+    /// Native plugin focus and mode changes cancel without stealing focus back.
+    pub(super) fn cancel_inline_rename(&mut self, cx: &mut Context<Self>) {
+        if self.inline_rename_rows().is_some() {
+            self.clear_rename_state(cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_rename_state(cx);
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -91,7 +127,7 @@ impl WorkspaceWindow {
     }
 
     pub(super) fn commit_group_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((space_id, tab)) = self.rename_group.take() else {
+        let Some((space_id, target)) = self.rename_group.take() else {
             return;
         };
         // Read from the input directly so Enter always commits the latest IME
@@ -103,13 +139,16 @@ impl WorkspaceWindow {
         window.focus(&self.focus, cx);
         if let Some(space) = self.spaces.iter().find(|space| space.entity_id() == space_id).cloned()
         {
-            space.update(cx, |space, _| space.rename_group(tab, name));
+            space.update(cx, |space, _| match target {
+                RenameTarget::Tab(tab) => space.rename_group(tab, name),
+                RenameTarget::Item(item) => space.rename_item(item, name),
+            });
         }
         cx.notify();
     }
 
     pub(super) fn rename_overlay(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.rename_window.is_some() {
+        if self.rename_window.is_some() || self.inline_rename_rows().is_some() {
             return None;
         }
         let kind = if self.rename_space.is_some() {
@@ -155,8 +194,8 @@ fn rename_dialog(
             "save-space-rename",
         ),
         RenameKind::Group => (
-            "Rename Group",
-            Some("Leave blank to use the tab count."),
+            "Rename Tab",
+            Some("Leave blank to use the default name."),
             "rename-group-dialog",
             "cancel-group-rename",
             "save-group-rename",

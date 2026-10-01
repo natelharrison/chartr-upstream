@@ -3,7 +3,7 @@
 use gpui::{ElementId, MouseButton, TitlebarOptions, point, px};
 use ui::prelude::*;
 
-pub const HEIGHT: f32 = 34.;
+pub const HEIGHT: f32 = 40.;
 
 /// Use the native title bar everywhere except macOS, where chartr draws the
 /// background and AppKit keeps responsibility for the traffic-light controls.
@@ -11,7 +11,7 @@ pub fn options(fallback_title: &'static str) -> TitlebarOptions {
     TitlebarOptions {
         title: (!cfg!(target_os = "macos")).then(|| fallback_title.into()),
         appears_transparent: cfg!(target_os = "macos"),
-        traffic_light_position: cfg!(target_os = "macos").then(|| point(px(9.), px(9.))),
+        traffic_light_position: cfg!(target_os = "macos").then(|| point(px(9.), px(12.))),
     }
 }
 

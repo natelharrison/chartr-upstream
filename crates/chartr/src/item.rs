@@ -47,6 +47,7 @@ impl Drop for PluginView {
 
 pub enum Item {
     Session(SessionItem),
+    Ended(crate::persistence::TerminalRecovery),
     Plugin(PluginItem),
     /// A temporary, space-owned item that presents the plugin surface picker.
     /// Selecting a contribution replaces this item at the same stable id, so
@@ -62,6 +63,7 @@ impl Item {
     pub fn title(&self) -> String {
         match self {
             Self::Session(item) => item.session.title(),
+            Self::Ended(item) => item.title.clone(),
             Self::Plugin(item) => item.title.clone(),
             Self::PluginLauncher { .. } => "New surface".to_owned(),
         }
@@ -70,7 +72,7 @@ impl Item {
     pub fn status(&self) -> Option<chartr_herdr::control::SessionStatus> {
         match self {
             Self::Session(item) => Some(item.session.info.status),
-            Self::Plugin(_) | Self::PluginLauncher { .. } => None,
+            Self::Plugin(_) | Self::Ended(_) | Self::PluginLauncher { .. } => None,
         }
     }
 
@@ -79,34 +81,35 @@ impl Item {
     }
 
     pub fn ended(&self) -> bool {
-        matches!(self, Self::Session(item) if item.session.ended().is_some())
+        matches!(self, Self::Ended(_))
+            || matches!(self, Self::Session(item) if item.session.ended().is_some())
     }
 
     pub fn as_session(&self) -> Option<&SessionItem> {
         match self {
             Self::Session(item) => Some(item),
-            Self::Plugin(_) | Self::PluginLauncher { .. } => None,
+            Self::Plugin(_) | Self::Ended(_) | Self::PluginLauncher { .. } => None,
         }
     }
 
     pub fn as_session_mut(&mut self) -> Option<&mut SessionItem> {
         match self {
             Self::Session(item) => Some(item),
-            Self::Plugin(_) | Self::PluginLauncher { .. } => None,
+            Self::Plugin(_) | Self::Ended(_) | Self::PluginLauncher { .. } => None,
         }
     }
 
     pub fn as_plugin(&self) -> Option<&PluginItem> {
         match self {
             Self::Plugin(item) => Some(item),
-            Self::Session(_) | Self::PluginLauncher { .. } => None,
+            Self::Session(_) | Self::Ended(_) | Self::PluginLauncher { .. } => None,
         }
     }
 
     pub fn as_plugin_mut(&mut self) -> Option<&mut PluginItem> {
         match self {
             Self::Plugin(item) => Some(item),
-            Self::Session(_) | Self::PluginLauncher { .. } => None,
+            Self::Session(_) | Self::Ended(_) | Self::PluginLauncher { .. } => None,
         }
     }
 
@@ -114,6 +117,9 @@ impl Item {
         match self {
             Self::Plugin(item) => Some(item.icon_path.clone()),
             Self::PluginLauncher { .. } => Some(crate::assets::PLUGIN_LAUNCHER_ICON_PATH.into()),
+            Self::Ended(item) => {
+                crate::agent_icons::session_icon(item.agent.as_deref(), None).map(Into::into)
+            }
             Self::Session(item) => crate::agent_icons::session_icon(
                 item.session.info.agent.as_deref(),
                 item.session.info.running.as_deref(),
@@ -129,7 +135,7 @@ impl Item {
     pub fn plugin_launcher_bound_session(&self) -> Option<&chartr_herdr::PaneId> {
         match self {
             Self::PluginLauncher { bound_session } => bound_session.as_ref(),
-            Self::Session(_) | Self::Plugin(_) => None,
+            Self::Session(_) | Self::Ended(_) | Self::Plugin(_) => None,
         }
     }
 }

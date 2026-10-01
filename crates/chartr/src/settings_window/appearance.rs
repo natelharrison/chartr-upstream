@@ -86,6 +86,11 @@ impl SettingsWindow {
         let fixed_mode = cx.listener(|this, _, _, cx| this.set_theme_mode(ThemeMode::Fixed, cx));
         let system_mode = cx.listener(|this, _, _, cx| this.set_theme_mode(ThemeMode::System, cx));
         let reduce_motion = settings.reduce_motion;
+        let work_surface = settings.work_surface;
+        let inset_surface =
+            cx.listener(|this, _, _, cx| this.set_work_surface(WorkSurface::Inset, cx));
+        let full_surface =
+            cx.listener(|this, _, _, cx| this.set_work_surface(WorkSurface::Full, cx));
         let reduce_motion_setting = cx.weak_entity();
         let font = cx.weak_entity();
         let smaller = cx.listener(|this, _, _, cx| this.adjust_ui_font_size(-1., cx));
@@ -196,6 +201,28 @@ impl SettingsWindow {
                 font_picker,
             ),
             setting_field("Font size", "Adjust the size of interface text.", font_size),
+            setting_field(
+                "Work surface",
+                "Inset the workspace as a card, or run it to the window edges.",
+                SegmentedControl::new(
+                    "Work surface",
+                    [
+                        SegmentedControlOption::new(
+                            "work-surface-inset",
+                            "Inset",
+                            work_surface == WorkSurface::Inset,
+                            inset_surface,
+                        ),
+                        SegmentedControlOption::new(
+                            "work-surface-full",
+                            "Full",
+                            work_surface == WorkSurface::Full,
+                            full_surface,
+                        ),
+                    ],
+                )
+                .list_row(),
+            ),
             setting_field(
                 "Reduce motion",
                 "Disable movement animations when switching views, resizing sidebars, and rearranging items.",

@@ -11,10 +11,7 @@ pub use form::{FORM_CONTROL_SIZE, form_button, form_picker, form_row, input_fiel
 pub use list_sorter::{ListSorter, SortAxis};
 pub use modal::open_native_modal;
 pub use popup::{ContextMenu, PopupMenu, popup_right_click_menu};
-pub use selection::{
-    SegmentedControl, SegmentedControlOption, SelectionRowBackgrounds, selection_list,
-    selection_row,
-};
+pub use selection::{SegmentedControl, SegmentedControlOption, selection_list, selection_row};
 
 pub(crate) use scrolling_list::scrollbar_thumb_colors;
 pub(crate) use scrolling_list::scrolling_list;

@@ -1,13 +1,15 @@
 # Workspace reference
 
 Detailed behavior of the Rust workspace, terminals, settings, and plugin host.
-Start with [Getting started](getting-started.md) and the
-[installation guide](installation.md).
+Start with the [fork README](../README.md) and
+[Daily macOS build guide](daily-app-build-and-verify.md). This personal fork has
+only been tested on macOS. Tabs and Chats changes are not verified end to end;
+this reference describes implementation, not a support guarantee.
 
 ## Spaces, panes, and items
 
 One window owns ordered spaces and one active space, following Zed's
-`MultiWorkspace` responsibility. The permanent **Free sessions** space is
+`MultiWorkspace` responsibility. The permanent **Scratch** space is
 folderless and starts sessions in the home directory (or its configured
 replacement). Folder spaces are canonical-path identities with independent
 outer tab collections and recursive pane groups.
@@ -38,11 +40,11 @@ all spaces; tabbed mode keeps the active space's outer
 entries beside its name. Selecting a group reveals its Zed-style draggable
 pane-local tab bars, while a standalone has no duplicate inner bar. Switching
 presentation never reparents or recreates an item. The sidebar presents one
-scrollable tree, including Free sessions. Click a space name or chevron to
+scrollable tree, including Scratch. Click a space name or chevron to
 collapse or expand its indented sessions; this state survives relaunch. Empty
 spaces show a muted **Space is empty** message; the heading's plus and surface
 buttons remain available. Drag any space
-heading, including Free sessions, to reorder the whole space. It stays locked
+heading, including Scratch, to reorder the whole space. It stays locked
 to the sidebar's X axis, continues tracking vertically outside the sidebar,
 autoscrolls at the list edges, and settles into the closest legal slot at release.
 Space order survives relaunch.
@@ -131,11 +133,19 @@ saving. A persistent banner explains that layout changes will not be saved.
 Project files and user-editable settings can still be saved normally.
 
 Normal app exit detaches sessions. An optional setting terminates them instead.
+Saved names, tab identities, layouts, and recovery metadata survive restoration.
+Surviving sessions reconnect; sessions missing from the backend remain as ended
+tabs for explicit resume. Confirmed absence of a locally ended attachment does
+not delete its tab or custom name. Recovery never automatically launches a
+replacement agent. Deliberately closed or dismissed tabs remain removed.
+
 The private Herdr runtime uses an exact socket under
 `$XDG_CONFIG_HOME/chartr/herdr`; inherited Herdr selectors are cleared so
-chartr cannot attach to a user's standalone daemon. Closed attach clients become
-item-local recovery states, and unexpected daemon death receives one clean
-restart before entering a stable crash-loop state with Retry.
+chartr cannot attach to a user's standalone daemon. Unexpected daemon death
+receives one clean backend restart before entering a stable crash-loop state
+with Retry. Restarting the backend is not the same as restarting an agent.
+The local synthetic regression tests do not establish real reboot or backend
+transport recovery.
 
 ## Your data
 
@@ -264,5 +274,8 @@ plugins/                   bundled and separately installable first-party plugin
 examples/plugins/          optional native and web reference examples
 vendor/herdr/              pinned sidecar fetch and licence
 docs/adr/                  architectural decisions
-.plan/maps/                durable product specification
+.plan/maps/                upstream product specification, unchanged
 ```
+
+Upstream's `.plan/maps/` specification and `docs/research/` notes are kept
+unchanged as upstream history. My personal planning notes are not included.

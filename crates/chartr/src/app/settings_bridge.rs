@@ -37,6 +37,9 @@ impl WorkspaceWindow {
         if self.mode == mode {
             return;
         }
+        // An inline name must not follow a mode change into a hidden row or
+        // turn into a modal. The mode's existing pending focus takes over.
+        self.cancel_inline_rename(cx);
         if mode == Mode::Inbox {
             self.terminal_mode = self.mode;
             self.terminal_search_open = false;

@@ -31,7 +31,7 @@ use crate::{
     mode::Mode,
     settings::{
         self, AppearanceContent, GeneralContent, ResolvedSettings, SettingsPage, SettingsStore,
-        TerminalContent, ThemeMode,
+        TerminalContent, ThemeMode, WorkSurface,
     },
     text_input::{InputEvent, TextInput},
 };
@@ -392,6 +392,18 @@ impl SettingsWindow {
         );
     }
 
+    fn set_work_surface(&mut self, surface: WorkSurface, cx: &mut Context<Self>) {
+        self.update_settings(
+            move |content| {
+                content.appearance.get_or_insert_with(AppearanceContent::default).work_surface =
+                    Some(surface);
+            },
+            false,
+            false,
+            cx,
+        );
+    }
+
     fn set_theme(&mut self, target: ThemeTarget, theme: String, cx: &mut Context<Self>) {
         self.update_settings(
             move |content| {
@@ -528,7 +540,7 @@ impl SettingsWindow {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Use for Free sessions".into()),
+            prompt: Some("Use for Scratch".into()),
         });
         cx.spawn(async move |this, cx| {
             let outcome = chosen.await;

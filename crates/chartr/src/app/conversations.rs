@@ -1,8 +1,185 @@
 use super::*;
 use crate::conversations::Event;
 use chartr_conversations::{NativeSession, Observation, Provider, Status};
+use std::sync::Mutex;
+
+// One lease across every window prevents two click-initiated writers while
+// their new terminals are still waiting to report their native identities.
+static RESUMING: Mutex<Vec<(Provider, NativeSession)>> = Mutex::new(Vec::new());
+
+pub(super) struct ResumeLease {
+    provider: Provider,
+    native: NativeSession,
+}
+
+impl ResumeLease {
+    fn reserve(provider: Provider, native: NativeSession) -> Result<Self, String> {
+        let mut held = RESUMING.lock().expect("locking resume identities");
+        if held.iter().any(|(kind, session)| *kind == provider && session == &native) {
+            return Err("This conversation is already live in another terminal.".into());
+        }
+        held.push((provider, native.clone()));
+        Ok(Self { provider, native })
+    }
+}
+
+impl Drop for ResumeLease {
+    fn drop(&mut self) {
+        let mut held = RESUMING.lock().expect("releasing resume identity");
+        held.retain(|(kind, session)| *kind != self.provider || session != &self.native);
+    }
+}
 
 impl WorkspaceWindow {
+    pub(super) fn prune_resume_owners(&mut self, cx: &App) {
+        self.resume_owners.retain(|(_, owner, item, pending)| {
+            *pending
+                || self.spaces.iter().any(|candidate| {
+                    candidate.entity_id() == *owner
+                        && candidate.read(cx).item(*item).is_some_and(|entry| {
+                            entry
+                                .as_session()
+                                .is_some_and(|session| session.session.ended().is_none())
+                        })
+                })
+        });
+    }
+
+    pub(super) fn resume_ended(&mut self, id: crate::workspace::ItemId, cx: &mut Context<Self>) {
+        let result = (|| {
+            let space = self.active.as_ref().ok_or("The space is unavailable.")?.clone();
+            let recovery = match space.read(cx).item(id) {
+                Some(crate::item::Item::Ended(recovery)) => recovery.clone(),
+                _ => return Err("This tab is no longer ended.".into()),
+            };
+            if !matches!(self.backend, Backend::Ready) {
+                return Err("Wait for the terminal service to connect.".into());
+            }
+            let provider = recovery
+                .agent
+                .as_deref()
+                .and_then(Provider::detect)
+                .ok_or("No agent was recorded for this tab.")?;
+            let native = recovery.native.as_ref();
+            resume_preflight(native, true, false)?;
+            let native = native.unwrap();
+            if !matches!(provider, Provider::Pi | Provider::Claude | Provider::Codex) {
+                return Err("This agent does not support resume here.".into());
+            }
+            let rows = self.conversations.read(cx);
+            let row = rows
+                .rows()
+                .iter()
+                .find(|row| row.provider == provider && row.native.as_ref() == Some(native));
+            let path = chartr_conversations::ProviderPaths::from_environment()
+                .session_log(provider, native)
+                .map_err(|_| "The transcript is missing.".to_owned())?;
+            let argument = if provider == Provider::Pi {
+                path.to_str().ok_or("The session path is not valid UTF-8.")?
+            } else {
+                native.id.as_str()
+            };
+            let live = self.spaces.iter().any(|space| {
+                let space = space.read(cx);
+                space.owned_session_ids().iter().any(|backend| {
+                    space.session_item(backend).is_some_and(|item| {
+                        let info = &item.session.info;
+                        item.session.ended().is_none()
+                            && info.agent.as_deref().and_then(Provider::detect) == Some(provider)
+                            && info.agent_session.as_ref().is_some_and(|identity| {
+                                NativeSession::from_identity(
+                                    provider,
+                                    &identity.kind,
+                                    &identity.value,
+                                )
+                                .as_ref()
+                                    == Some(native)
+                            })
+                    })
+                })
+            });
+            self.prune_resume_owners(cx);
+            resume_preflight(
+                Some(native),
+                path.is_file(),
+                live || row.is_some_and(|row| row.runtime.is_some()),
+            )?;
+            let service = self
+                .catalog
+                .services
+                .get::<chartr_plugin::services::ResumeAgents>(
+                    chartr_plugin::services::AGENT_SERVICE,
+                )
+                .ok_or("Enable Agent and register an agent first.")?;
+            let input = service.prepare(provider.slug(), argument, cx)?;
+            let lease = ResumeLease::reserve(provider, native.clone())?;
+            let owner = space.entity_id();
+            self.resume_owners.push((lease, owner, id, true));
+            let task = space.update(cx, |space, cx| space.reopen_ended(id, Some(input), cx));
+            cx.spawn(async move |this, cx| {
+                let result = task.await;
+                let _ = this.update(cx, |this, cx| {
+                    if result.is_err() {
+                        this.resume_owners
+                            .retain(|(_, candidate, item, _)| *candidate != owner || *item != id);
+                    } else if let Some((_, _, _, pending)) = this
+                        .resume_owners
+                        .iter_mut()
+                        .find(|(_, candidate, item, _)| *candidate == owner && *item == id)
+                    {
+                        *pending = false;
+                    }
+                    this.prune_resume_owners(cx);
+                    if let Err(error) = result {
+                        this.resume_error = Some((owner, id, error.clone()));
+                        this.problem = Some(error);
+                    } else {
+                        this.resume_error = None;
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+            Ok::<_, String>(())
+        })();
+        if let Err(error) = result {
+            if let Some(space) = &self.active {
+                self.resume_error = Some((space.entity_id(), id, error.clone()));
+            }
+            self.problem = Some(error);
+            cx.notify();
+        } else {
+            self.resume_error = None;
+        }
+    }
+
+    pub(super) fn agent_choices(&self, cx: &App) -> chrome::AgentChoices {
+        chrome::AgentChoices {
+            names: self.conversations.read(cx).registered_agent_names(cx).unwrap_or_default(),
+            last_used: self.last_agent.clone(),
+        }
+    }
+
+    pub(super) fn quick_agent_chat(&mut self, name: String, cx: &mut Context<Self>) {
+        self.sync_conversation_spaces(cx);
+        let started = name.clone();
+        self.conversations.update(cx, |view, _| {
+            view.set_agent_services(self.catalog.services.clone());
+        });
+        let result = if matches!(self.backend, Backend::Ready) {
+            self.conversations.update(cx, |view, cx| view.begin_active_space_conversation(name, cx))
+        } else {
+            Err("Wait for the terminal service to connect.".into())
+        };
+        match result {
+            Ok(_) => self.last_agent = Some(started),
+            Err(error) => {
+                self.problem = Some(error);
+                cx.notify();
+            }
+        }
+    }
+
     pub(super) fn activate_selected_conversation(&mut self, cx: &mut Context<Self>) {
         if !matches!(self.backend, Backend::Ready) {
             return;
@@ -193,6 +370,7 @@ impl WorkspaceWindow {
         };
         let executor = cx.background_executor().clone();
         let window_handle = window.window_handle();
+        let select_workspace_tab = agent_launch_selects_workspace_tab(self.mode);
         cx.spawn(async move |this, cx| {
             let install_client = client.clone();
             // Install/verify known providers before launch so SessionStart is not missed.
@@ -222,6 +400,18 @@ impl WorkspaceWindow {
                 .map_err(|e| e.to_string())??;
                 let terminal =
                     space.update(cx, |space, cx| space.prepare_plugin_session(cx)).await?;
+                if select_workspace_tab {
+                    this.update(cx, |this, cx| {
+                        space.update(cx, |space, cx| {
+                            space.activate_session(&chartr_herdr::PaneId(terminal.id.clone()), cx)
+                        });
+                        if this.active.as_ref() == Some(&space) && this.mode != Mode::Inbox {
+                            this.mode_focus_pending = true;
+                            cx.notify();
+                        }
+                    })
+                    .map_err(|e| e.to_string())?;
+                }
                 cx.update_window(window_handle, |_, window, cx| {
                     space.update(cx, |space, cx| {
                         space.size_conversation_terminal(
@@ -258,6 +448,10 @@ impl WorkspaceWindow {
     }
 }
 
+fn agent_launch_selects_workspace_tab(mode: Mode) -> bool {
+    mode != Mode::Inbox
+}
+
 fn prepare_registered_conversation(
     services: &chartr_plugin::services::Services,
     name: &str,
@@ -270,6 +464,24 @@ fn prepare_registered_conversation(
     let service =
         services.get::<Agents>(AGENT_SERVICE).ok_or("Enable Agent and register an agent first.")?;
     Ok(InboxLaunch { input: service.prepare(name, "", cx)?, integration: None })
+}
+
+fn resume_preflight(
+    native: Option<&NativeSession>,
+    transcript_exists: bool,
+    live: bool,
+) -> Result<(), String> {
+    let native = native.ok_or("No native session ID was recorded.")?;
+    if native.id.is_empty() {
+        return Err("No native session ID was recorded.".into());
+    }
+    if !transcript_exists {
+        return Err("The transcript is missing.".into());
+    }
+    if live {
+        return Err("This conversation is already live in another terminal.".into());
+    }
+    Ok(())
 }
 
 /// Reused panes must never expose another native conversation through an old row.
@@ -296,6 +508,13 @@ fn matches_session(
 mod tests {
     use super::*;
 
+    #[test]
+    fn agent_launch_selects_workspace_tab_only_outside_inbox() {
+        assert!(agent_launch_selects_workspace_tab(Mode::Sidebar));
+        assert!(agent_launch_selects_workspace_tab(Mode::Tabs));
+        assert!(!agent_launch_selects_workspace_tab(Mode::Inbox));
+    }
+
     fn session() -> chartr_herdr::control::Session {
         chartr_herdr::control::Session {
             id: chartr_herdr::PaneId("pane".into()),
@@ -315,6 +534,24 @@ mod tests {
             foreground_pid: None,
             cwd: None,
         }
+    }
+
+    #[test]
+    fn a_resume_identity_has_only_one_writer_across_windows() {
+        let native = NativeSession { id: "shared-resume-lease-test".into(), path: None };
+        let first = ResumeLease::reserve(Provider::Pi, native.clone()).unwrap();
+        assert!(ResumeLease::reserve(Provider::Pi, native.clone()).is_err());
+        drop(first);
+        assert!(ResumeLease::reserve(Provider::Pi, native).is_ok());
+    }
+
+    #[test]
+    fn resume_refuses_unknown_id_missing_transcript_and_live_writer() {
+        let native = NativeSession { id: "exact-id".into(), path: None };
+        assert!(resume_preflight(None, true, false).unwrap_err().contains("native session ID"));
+        assert!(resume_preflight(Some(&native), false, false).unwrap_err().contains("transcript"));
+        assert!(resume_preflight(Some(&native), true, true).unwrap_err().contains("already live"));
+        assert!(resume_preflight(Some(&native), true, false).is_ok());
     }
 
     #[test]

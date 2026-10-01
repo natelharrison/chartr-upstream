@@ -30,6 +30,54 @@ struct NativeModalHarness;
 
 struct NativeModalBody;
 
+#[gpui::test]
+fn menus_open_at_the_pointer_tip_or_under_the_button(cx: &mut TestAppContext) {
+    use gpui::popup::{PopupAnchor, PopupGravity};
+
+    cx.update(|cx| {
+        ::settings::init(cx);
+        theme::init(theme::LoadThemes::JustBase, cx);
+        crate::fonts::install(&crate::settings::ResolvedSettings::default(), cx);
+    });
+    let (_, cx) = cx.add_window_view(|_, _| MenuHarness { invoked: Rc::new(Cell::new(false)) });
+    let trigger = Bounds::new(point(px(40.), px(60.)), size(px(20.), px(20.)));
+    let mut options = |placement| {
+        let kind = cx.update(|window, _| anchored_popup_window_kind(window, trigger, placement));
+        let WindowKind::AnchoredPopup(options) = kind else {
+            panic!("menus must use an anchored popup window");
+        };
+        options
+    };
+
+    // A right-click menu's top edge is level with the pointer tip, just to its right.
+    let pointer = options(PopupPlacement::Pointer);
+    assert_eq!(pointer.anchor, PopupAnchor::TopLeft);
+    assert_eq!(pointer.gravity, PopupGravity::BottomRight);
+    assert_eq!(pointer.offset, point(-POINTER_INSET - POPUP_OUTSET, -POINTER_INSET - POPUP_OUTSET));
+
+    // A button menu drops down under the button, sharing its left edge.
+    let button = options(PopupPlacement::Standard(Anchor::TopLeft));
+    assert_eq!(button.anchor, PopupAnchor::BottomLeft);
+    assert_eq!(button.gravity, PopupGravity::BottomRight);
+    assert_eq!(button.offset, point(-POPUP_OUTSET, POPUP_GAP - POPUP_OUTSET));
+}
+
+#[test]
+fn pull_downs_near_the_right_edge_line_up_with_the_button_right_edge() {
+    let left = PopupPlacement::Standard(Anchor::TopLeft);
+    let near_edge = Bounds::new(point(px(900.), px(8.)), size(px(80.), px(24.)));
+    let with_room = Bounds::new(point(px(40.), px(8.)), size(px(24.), px(24.)));
+    assert_eq!(
+        keep_inside_window(left, near_edge, px(320.), px(1000.)),
+        PopupPlacement::Standard(Anchor::TopRight)
+    );
+    assert_eq!(keep_inside_window(left, with_room, px(320.), px(1000.)), left);
+    assert_eq!(
+        keep_inside_window(PopupPlacement::Pointer, near_edge, px(320.), px(1000.)),
+        PopupPlacement::Pointer
+    );
+}
+
 impl Render for NativeTooltipHarness {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         window.set_rem_size(px(14.));
@@ -126,15 +174,12 @@ fn anchored_menu_highlight_has_uniform_border_insets(cx: &mut TestAppContext) {
         let quads = window.painted_quads();
         let border = quads
             .iter()
-            .find(|quad| quad.border_color == cx.theme().colors().border_variant)
+            .find(|quad| quad.border_color == ui::menu_outline_color(cx))
             .expect("menu border")
             .bounds;
         let highlight = quads
             .iter()
-            .find(|quad| {
-                quad.background == cx.theme().colors().ghost_element_hover.into()
-                    || quad.background == cx.theme().colors().ghost_element_selected.into()
-            })
+            .find(|quad| quad.background == ui::menu_highlight_color(false, cx).into())
             .expect("highlighted menu entry")
             .bounds;
         let insets = [
@@ -147,6 +192,93 @@ fn anchored_menu_highlight_has_uniform_border_insets(cx: &mut TestAppContext) {
             assert!((inset - insets[0]).as_f32().abs() < 0.1, "unequal menu insets: {insets:?}");
         }
     });
+}
+
+struct RichMenuHarness {
+    expected_height: Rc<Cell<Option<Pixels>>>,
+    destructive: Rc<Cell<Option<bool>>>,
+    deleted: Rc<Cell<bool>>,
+}
+
+impl Render for RichMenuHarness {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let expected_height = self.expected_height.clone();
+        let destructive = self.destructive.clone();
+        let deleted = self.deleted.clone();
+        PopupMenu::new("rich-popup-test")
+            .trigger(ui::Button::new("rich-popup-trigger", "Open"))
+            .menu(move |window, cx| {
+                let deleted = deleted.clone();
+                let menu = ContextMenu::build_popup(window, cx, move |menu| {
+                    menu.context_line(Some("chartr"), "· 2 tabs")
+                        .entry("Rename", None, |_, _| {})
+                        .with_meta("⏎")
+                        .entry_with_icon_path("Split", "icons/plus.svg", |_, _| {})
+                        .with_icon_color(Color::Success)
+                        .header("Layout")
+                        .entry("Keep", None, |_, _| {})
+                        .separator()
+                        .danger_entry("Delete", move |_, _| deleted.set(true))
+                        .with_icon("icons/plus.svg")
+                });
+                expected_height.set(Some(menu.height));
+                destructive.set(menu.items.iter().find_map(|item| match item {
+                    PopupItem::Entry(entry) if entry.label.as_ref() == "Delete" => {
+                        Some(entry.destructive && entry.icon.is_some())
+                    }
+                    _ => None,
+                }));
+                Some(menu)
+            })
+    }
+}
+
+fn open_rich_menu(
+    cx: &mut TestAppContext,
+) -> (RichMenuHarness, gpui::VisualTestContext, AnyWindowHandle) {
+    cx.update(|cx| {
+        ::settings::init(cx);
+        theme::init(theme::LoadThemes::JustBase, cx);
+        crate::fonts::install(&crate::settings::ResolvedSettings::default(), cx);
+    });
+    let state = RichMenuHarness {
+        expected_height: Rc::default(),
+        destructive: Rc::default(),
+        deleted: Rc::default(),
+    };
+    let view_state = RichMenuHarness {
+        expected_height: state.expected_height.clone(),
+        destructive: state.destructive.clone(),
+        deleted: state.deleted.clone(),
+    };
+    let (_, cx) = cx.add_window_view(|_, _| view_state);
+    let parent = cx.window_handle();
+    cx.simulate_click(point(px(10.), px(10.)), Modifiers::none());
+    let popup = cx.windows().into_iter().find(|window| *window != parent).unwrap();
+    let popup = gpui::VisualTestContext::from_window(popup, cx);
+    popup.run_until_parked();
+    (state, popup, parent)
+}
+
+#[gpui::test]
+fn popup_metrics_match_the_rendered_menu_height(cx: &mut TestAppContext) {
+    let (state, mut popup, _) = open_rich_menu(cx);
+    let expected = state.expected_height.get().expect("menu built") + POPUP_OUTSET * 2.;
+    let fitted = popup.update(|window, _| window.window_bounds().get_bounds().size.height);
+    assert!(
+        (fitted - expected).as_f32().abs() <= 1.,
+        "PopupMetrics predicted {expected:?} but the menu rendered {fitted:?}"
+    );
+}
+
+#[gpui::test]
+fn danger_entry_with_icon_stays_destructive_and_clickable(cx: &mut TestAppContext) {
+    let (state, mut popup, parent) = open_rich_menu(cx);
+    assert_eq!(state.destructive.get(), Some(true), "with_icon must keep the danger styling");
+    let entry = popup.debug_bounds("MENU_ITEM-Delete").expect("danger entry renders");
+    popup.simulate_click(entry.center(), Modifiers::none());
+    assert!(state.deleted.get(), "the danger entry should invoke its handler");
+    assert_eq!(popup.windows(), vec![parent]);
 }
 
 #[gpui::test]

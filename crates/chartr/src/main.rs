@@ -19,6 +19,7 @@ mod assets;
 mod chrome;
 mod components;
 mod conversations;
+mod design;
 mod fonts;
 mod item;
 mod keymap;
@@ -44,12 +45,24 @@ mod spaces;
 mod terminal_host;
 mod text_input;
 mod title_bar;
+#[cfg(feature = "ui-lab")]
+mod ui_lab;
 #[path = "../../../plugins/wayfinder/src/lib.rs"]
 mod wayfinder_plugin;
 mod web_plugin;
 mod workspace;
 
 fn main() {
+    #[cfg(feature = "ui-lab")]
+    if let Some(output) = ui_lab::capture_path(std::env::args_os()) {
+        if let Err(error) = ui_lab::capture(&output) {
+            eprintln!("chartr UI lab capture failed: {error:#}");
+            std::process::exit(1);
+        }
+        println!("chartr UI lab capture: {}", output.display());
+        return;
+    }
+
     #[cfg(target_os = "linux")]
     if Path::new("/sys/module/nvidia").is_dir()
         && std::env::var_os("WEBKIT_DMABUF_RENDERER_FORCE_SHM").is_none()

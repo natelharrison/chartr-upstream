@@ -437,6 +437,9 @@ impl WorkspaceWindow {
         Rc::new(move |view, cx| {
             let space = space.clone();
             let _ = weak.update(cx, |this, cx| {
+                // Native webviews do not send GPUI outside-click events; their
+                // existing focus bridge supplies the same cancel-without-save.
+                this.cancel_inline_rename(cx);
                 if space.update(cx, |space, _| space.activate_plugin_view(view)) {
                     this.active = Some(space);
                     cx.notify();
@@ -483,7 +486,7 @@ impl WorkspaceWindow {
         })
     }
 
-    fn open_plugin_from_launcher(
+    pub(super) fn open_plugin_from_launcher(
         &mut self,
         launcher: crate::workspace::ItemId,
         key: chartr_plugin::PaneKey,
@@ -557,6 +560,26 @@ impl WorkspaceWindow {
         });
         self.problem = None;
         cx.notify();
+    }
+
+    pub(super) fn open_plugin_from_new_menu(
+        &mut self,
+        key: chartr_plugin::PaneKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.catalog.panes().iter().any(|pane| pane.key == key) {
+            self.problem = Some("That plugin contribution is no longer available.".to_owned());
+            cx.notify();
+            return;
+        }
+        let Some(space) = self.active.clone() else {
+            self.problem = Some("Choose an active space first.".to_owned());
+            cx.notify();
+            return;
+        };
+        let launcher = space.update(cx, |space, cx| space.open_plugin_launcher(cx));
+        self.open_plugin_from_launcher(launcher, key, window, cx);
     }
 
     pub(super) fn restore_plugins_once(&mut self, window: &mut Window, cx: &mut Context<Self>) {

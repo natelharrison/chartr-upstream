@@ -5,7 +5,9 @@ listener dependency, settings controls, and terminal bridge are not compiled
 into chartr. Source and saved sharing data are retained for future development;
 saved sharing settings cannot start a listener in this build.
 
-The retained `com.chartr.companion` implementation connects [Chartr Mobile](../../../chartr-mobile) to desktop terminal sessions. The sections below describe that implementation before it was disabled.
+The retained `com.chartr.companion` implementation connects a separate Chartr
+Mobile client to desktop terminal sessions. That client is not included in this
+repository. The sections below describe the implementation before it was disabled.
 
 ## Connect
 

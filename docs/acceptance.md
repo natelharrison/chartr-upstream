@@ -1,15 +1,15 @@
 # Release acceptance
 
-The durable behavior contract is the
-[workspace specification](../.plan/maps/chartr-workspace/spec.md). This
-checklist is the release gate, not a second specification. It describes checks
-to perform, not a claim that every platform has passed. See the dated
-[documentation audit](research/2026-09-17-documentation-audit.md) for the latest
-source-validation results and known gaps.
+This is an inherited release checklist, not a record of passing results.
+The current behavior is described in the [workspace reference](workspace.md)
+and [fork README](../README.md). This personal fork has only been tested on
+macOS; changed Tabs and Chats workflows still need proper end-to-end testing.
+Linux and Windows have not been verified for this fork.
 
 ## Automated gate
 
-Both macOS and Ubuntu must pass [CI](../.github/workflows/ci.yml), including
+Before claiming a macOS and Linux release, both platforms must pass
+[CI](../.github/workflows/ci.yml), including
 formatting, the locked workspace suite, the native plugin contract build, and
 the Linux Wry and GPUI X11 link. After [setting up a source build](installation.md),
 run these development checks from the repository root:
@@ -52,7 +52,7 @@ hands-on acceptance passed. Complete the existing gates before publishing it.
 Review at 700×900, 1100×720, and a maximized window in both chartr Dark and
 chartr Light. Capture and compare:
 
-- empty Free sessions startup, one folder, and several spaces;
+- empty Scratch startup, one folder, and several spaces;
 - several variable-height space cards before, during, and after a reorder;
 - Sidebar and Inbox with all spaces, and Tabbed mode;
 - empty space, one standalone tab, nested horizontal/vertical panes, resized dividers,
@@ -217,7 +217,7 @@ Scroll space cards upward beneath the **Spaces** heading: a short, theme-colored
 frosted fade should gently hide their top edge, with no horizontal border. The
 fade should ease in over the first few pixels of scrolling and disappear at the
 top. Check light and dark themes, wheel/trackpad scrolling, thumb dragging, and
-clicking rows beneath the fade. The heading stays clear; Free sessions sorts and
+clicking rows beneath the fade. The heading stays clear; Scratch sorts and
 scrolls as an ordinary space card,
 and scrolling should remain smooth with many cards.
 
@@ -245,7 +245,7 @@ FLIP settle remains continuous. Enable Appearance / Reduce Motion and repeat:
 direct pointer carrying and sorting remain, while displaced-card and release
 settle animations are absent.
 
-Open the bundled native Agent plugin in a folder space and in Free sessions. Confirm
+Open the bundled native Agent plugin in a folder space and in Scratch. Confirm
 its plugin card and tabs show the Chip icon. With an empty registry, confirm the
 composer, picker, and launch action are disabled;
 the space and Git branch sit above rather than inside the composer; and the prompt
@@ -307,7 +307,7 @@ while preserving surrounding user content.
 ## Persistence and lifecycle
 
 Relaunch after changing window bounds, sidebar width, mode, full space
-order (including Free sessions and a recovered missing folder), space names,
+order (including Scratch and a recovered missing folder), space names,
 outer-tab order, split ratios, active groups/panes/items, plugin Settings, and a
 missing folder. Confirm the sidebar and `spaces.toml` retain the committed order.
 Confirm normal exit adopts detached terminals; item close kills exactly one session;

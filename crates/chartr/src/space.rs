@@ -10,13 +10,18 @@ use std::{
     path::PathBuf,
 };
 
-use chartr_herdr::{PaneId, WorkspaceId, control::Client};
+use chartr_herdr::{
+    PaneId, WorkspaceId,
+    control::{Client, SessionStatus},
+};
 use gpui::{Context, EventEmitter};
 
 use crate::{
-    chrome::{Action, Entry},
+    chrome::{Action, Entry, LayoutEntry, SpaceActivity},
     item::{Item, PluginItem, SessionItem},
-    persistence::{PersistedItem, PersistedSpace, SpaceKind as PersistedSpaceKind},
+    persistence::{
+        PersistedItem, PersistedSpace, SpaceKind as PersistedSpaceKind, TerminalRecovery,
+    },
     session::Session,
     spaces,
     workspace::{ItemId, SplitDirection, Workspace, WorkspaceTabId, WorkspaceTabs},
@@ -59,6 +64,7 @@ pub struct Space {
     missing_sessions: HashMap<PaneId, u8>,
     reattaching: HashSet<ItemId>,
     restoring_sessions: HashMap<String, ItemId>,
+    restoring_recovery: HashMap<String, TerminalRecovery>,
     restoring_plugins: Vec<PersistedItem>,
     drag_target: Option<(WorkspaceTabId, crate::workspace::PaneId, Option<SplitDirection>)>,
     problem: Option<String>,
@@ -88,6 +94,7 @@ impl Space {
             missing_sessions: HashMap::new(),
             reattaching: HashSet::new(),
             restoring_sessions: HashMap::new(),
+            restoring_recovery: HashMap::new(),
             restoring_plugins: Vec::new(),
             drag_target: None,
             problem: None,
@@ -152,6 +159,89 @@ impl Space {
         self.layout.active_tab_id()
     }
 
+    pub fn activate_layout(&mut self, tab: WorkspaceTabId, cx: &mut Context<Self>) -> bool {
+        match self.layout.activate_tab(tab) {
+            Ok(()) => {
+                cx.notify();
+                true
+            }
+            Err(error) => {
+                self.problem = Some(format!("activating layout {}: {error}", tab.get()));
+                cx.notify();
+                false
+            }
+        }
+    }
+
+    pub fn layouts(&self, space: gpui::EntityId) -> Vec<LayoutEntry> {
+        let mut entries = self.entries(space);
+        self.layout
+            .tabs()
+            .iter()
+            .map(|tab| LayoutEntry {
+                tab: tab.id,
+                name: tab.name().map(str::to_owned),
+                selected: self.layout.active_tab_id() == Some(tab.id),
+                needs_you: tab.layout.item_ids().any(|id| {
+                    self.items.get(&id).and_then(Item::status) == Some(SessionStatus::Blocked)
+                }),
+                entry: entries
+                    .iter()
+                    .position(|entry| entry.tab == tab.id)
+                    .map(|index| entries.swap_remove(index)),
+            })
+            .collect()
+    }
+
+    /// Agents that are waiting on the user or working, waiting first.
+    pub fn agent_notices(&self, space: gpui::EntityId) -> Vec<crate::chrome::AgentNotice> {
+        let mut notices: Vec<_> = self
+            .layout
+            .item_ids()
+            .filter_map(|id| {
+                let item = self.items.get(&id)?;
+                let session = item.as_session()?;
+                let waiting = match session.session.info.status {
+                    SessionStatus::Blocked => true,
+                    SessionStatus::Working => false,
+                    _ => return None,
+                };
+                let info = &session.session.info;
+                let agent = info.agent.clone().unwrap_or_else(|| item.title());
+                Some(crate::chrome::AgentNotice {
+                    space,
+                    item: id,
+                    title: format!("{agent} · {}", self.name()),
+                    detail: info.conversation_title.clone(),
+                    icon_path: item.icon_path(),
+                    waiting,
+                })
+            })
+            .collect();
+        notices.sort_by_key(|notice| !notice.waiting);
+        notices
+    }
+
+    pub fn activity(&self) -> Option<SpaceActivity> {
+        let sessions: Vec<_> =
+            self.items.values().filter(|item| item.as_session().is_some()).collect();
+        if sessions.iter().any(|item| item.status() == Some(SessionStatus::Working)) {
+            return Some(SpaceActivity::Live);
+        }
+        if self.starting
+            || !self.attaching_sessions.is_empty()
+            || !self.restoring_sessions.is_empty()
+            || sessions.iter().any(|item| {
+                item.status() == Some(SessionStatus::Blocked)
+                    || item.process_running()
+                    || item.as_session().is_some_and(SessionItem::bell)
+            })
+        {
+            return Some(SpaceActivity::Waiting);
+        }
+        sessions.iter().any(|item| item.status().is_some()).then_some(SpaceActivity::Inactive)
+    }
+
     pub fn active_layout(&self) -> Option<&Workspace> {
         self.layout.active_workspace()
     }
@@ -162,6 +252,18 @@ impl Space {
 
     pub fn item(&self, id: ItemId) -> Option<&Item> {
         self.items.get(&id)
+    }
+
+    /// A pane tab's title: the name the user gave it, or the item's live title.
+    pub fn item_title(&self, id: ItemId) -> Option<String> {
+        let item = self.items.get(&id)?;
+        Some(self.layout.item_name(id).map_or_else(|| item.title(), str::to_owned))
+    }
+
+    pub fn rename_item(&mut self, id: ItemId, name: Option<String>) {
+        if let Err(error) = self.layout.rename_item(id, name) {
+            self.problem = Some(error.to_string());
+        }
     }
 
     pub fn install_terminal_view(
@@ -295,8 +397,10 @@ impl Space {
     }
 
     pub fn restore_saved(&mut self, saved: &PersistedSpace) {
+        self.name = saved.name.clone();
         self.layout = saved.layout.clone();
         self.restoring_sessions.clear();
+        self.restoring_recovery.clear();
         self.restoring_plugins.clear();
         let mut retained = HashSet::new();
         for item in &saved.items {
@@ -304,8 +408,14 @@ impl Space {
             if let Some(id) = id {
                 retained.insert(id);
                 match item {
-                    PersistedItem::Terminal { backend_id, .. } => {
+                    PersistedItem::Terminal { backend_id, recovery, .. } => {
                         self.restoring_sessions.insert(backend_id.clone(), id);
+                        if let Some(recovery) = recovery {
+                            self.restoring_recovery.insert(backend_id.clone(), recovery.clone());
+                        }
+                    }
+                    PersistedItem::Ended { recovery, .. } => {
+                        self.items.insert(id, Item::Ended(recovery.clone()));
                     }
                     PersistedItem::Plugin { .. } => self.restoring_plugins.push(item.clone()),
                 }
@@ -328,7 +438,14 @@ impl Space {
                 Item::Session(item) => Some(PersistedItem::Terminal {
                     item_id: id.get(),
                     backend_id: item.session.id().0.clone(),
+                    recovery: Some(TerminalRecovery {
+                        title: item.session.title(),
+                        ..TerminalRecovery::from_session(&item.session.info)
+                    }),
                 }),
+                Item::Ended(recovery) => {
+                    Some(PersistedItem::Ended { item_id: id.get(), recovery: recovery.clone() })
+                }
                 Item::Plugin(item) if item.restorable => Some(PersistedItem::Plugin {
                     item_id: id.get(),
                     plugin: item.contribution.plugin.clone(),
@@ -340,7 +457,11 @@ impl Space {
             })
             .collect();
         items.extend(self.restoring_sessions.iter().map(|(backend_id, item)| {
-            PersistedItem::Terminal { item_id: item.get(), backend_id: backend_id.clone() }
+            PersistedItem::Terminal {
+                item_id: item.get(),
+                backend_id: backend_id.clone(),
+                recovery: self.restoring_recovery.get(backend_id).cloned(),
+            }
         }));
         items.extend(self.restoring_plugins.iter().cloned());
         PersistedSpace {
@@ -546,7 +667,7 @@ impl Space {
                             .map(str::to_owned)
                             .unwrap_or_else(|| format!("{} tabs", tab.layout.item_count()))
                     } else {
-                        item.title()
+                        self.layout.item_name(id).map_or_else(|| item.title(), str::to_owned)
                     },
                     icon_path: (!grouped).then(|| item.icon_path()).flatten(),
                     status: (!grouped).then(|| item.status()).flatten(),
@@ -589,8 +710,8 @@ impl Space {
         }
     }
 
-    pub fn group_name(&self, tab: WorkspaceTabId) -> Option<&str> {
-        self.layout.tab(tab).filter(|tab| tab.is_grouped()).and_then(|tab| tab.name())
+    pub fn tab_name(&self, tab: WorkspaceTabId) -> Option<&str> {
+        self.layout.tab(tab).and_then(|tab| tab.name())
     }
 
     pub fn rename_group(&mut self, tab: WorkspaceTabId, name: Option<String>) {
@@ -640,12 +761,20 @@ impl Space {
             | Action::NewSpace
             | Action::NewPluginPane
             | Action::NewPluginPaneInSpace { .. }
+            | Action::NewSurfaceInSpace { .. }
+            | Action::StartAgentInSpace { .. }
             | Action::ToggleSpaceCollapsed { .. }
+            | Action::ActivateSpace { .. }
+            | Action::ActivateLayout { .. }
             | Action::NewInSpace { .. }
             | Action::MoveWorkspaceTab { .. }
             | Action::CloseGroup { .. }
+            | Action::CloseOtherTabs { .. }
             | Action::UngroupPane { .. }
             | Action::RenameGroup { .. }
+            | Action::RenameItem { .. }
+            | Action::CommitRename
+            | Action::CancelRename
             | Action::CloseSpace { .. }
             | Action::RenameSpace { .. }
             | Action::OpenSpaceFolder { .. }
@@ -858,7 +987,9 @@ impl Space {
         for backend in confirmed_missing_sessions(local, &snapshot_ids, &mut self.missing_sessions)
         {
             if let Some(item) = self.sessions.get(&backend).copied() {
-                self.retire_item(item);
+                // Backend absence is not an explicit close. Keep the tab and
+                // capture its recovery identity before dropping the attachment.
+                self.end_item(item);
             }
         }
 
@@ -887,12 +1018,12 @@ impl Space {
             let id = PaneId(backend.clone());
             let keep = snapshot_ids.contains(&id) || self.attaching_sessions.contains(&id);
             if !keep {
-                stale.push(*item);
+                stale.push((backend.clone(), *item));
             }
             keep
         });
-        for item in stale {
-            let _ = self.layout.remove_item(item);
+        for (backend, item) in stale {
+            self.end_saved(item, &backend);
         }
         if infos.is_empty() {
             return;
@@ -916,21 +1047,21 @@ impl Space {
             let _ = this.update(cx, |this, cx| {
                 for (restored, info, result) in attached {
                     this.attaching_sessions.remove(&info.id);
-                    this.restoring_sessions.remove(&info.id.0);
                     if this.retired_sessions.contains(&info.id) {
                         continue;
                     }
                     match result {
                         Ok(builder) => {
+                            this.restoring_sessions.remove(&info.id.0);
+                            this.restoring_recovery.remove(&info.id.0);
                             let session = this.session_from_builder(info, builder, cx);
                             if let Some(id) = this.insert_session_with_id(session, restored) {
                                 cx.emit(SpaceEvent::TerminalReady(id));
                             }
                         }
                         Err(error) => {
-                            if let Some(item) = restored {
-                                let _ = this.layout.remove_item(item);
-                            }
+                            // The backend still owns this terminal. Keep its saved tab
+                            // so a later snapshot can retry attachment.
                             this.problem = Some(error.to_string());
                         }
                     }
@@ -942,7 +1073,7 @@ impl Space {
     }
 
     pub fn start_session(&mut self, cx: &mut Context<Self>) {
-        self.start_session_at(None, None, cx).detach();
+        self.start_session_at(None, None, None, cx).detach();
     }
 
     /// Create an ordinary chartr-owned terminal and queue its first shell/TUI
@@ -953,14 +1084,14 @@ impl Space {
         input: chartr_plugin::TerminalLaunch,
         cx: &mut Context<Self>,
     ) {
-        self.start_session_at(None, Some(input), cx).detach();
+        self.start_session_at(None, Some(input), None, cx).detach();
     }
 
     pub fn prepare_plugin_session(
         &mut self,
         cx: &mut Context<Self>,
     ) -> gpui::Task<Result<chartr_plugin::PreparedTerminal, String>> {
-        self.start_session_at(None, None, cx)
+        self.start_session_at(None, None, None, cx)
     }
 
     /// Give a newly allocated CLI a usable grid until Inbox first mounts it.
@@ -990,7 +1121,7 @@ impl Space {
         pane: crate::workspace::PaneId,
         cx: &mut Context<Self>,
     ) {
-        self.start_session_at(Some((tab, pane, None)), None, cx).detach();
+        self.start_session_at(Some((tab, pane, None)), None, None, cx).detach();
     }
 
     /// Resolve a dropped terminal's split only after the backend has started it.
@@ -1001,13 +1132,34 @@ impl Space {
         direction: Option<SplitDirection>,
         cx: &mut Context<Self>,
     ) {
-        self.start_session_at(Some((tab, pane, direction)), None, cx).detach();
+        self.start_session_at(Some((tab, pane, direction)), None, None, cx).detach();
+    }
+
+    pub fn reopen_ended(
+        &mut self,
+        id: ItemId,
+        input: Option<chartr_plugin::TerminalLaunch>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<Result<chartr_plugin::PreparedTerminal, String>> {
+        let Some(Item::Ended(recovery)) = self.items.get(&id) else {
+            return gpui::Task::ready(Err("This tab is no longer ended.".into()));
+        };
+        let cwd = recovery.cwd.clone().unwrap_or_else(|| self.path.clone());
+        self.start_session_at(None, input, Some((id, cwd)), cx)
+    }
+
+    pub fn dismiss_ended(&mut self, id: ItemId, cx: &mut Context<Self>) {
+        if matches!(self.items.get(&id), Some(Item::Ended(_))) {
+            self.remove_item(id);
+            cx.notify();
+        }
     }
 
     fn start_session_at(
         &mut self,
         destination: Option<(WorkspaceTabId, crate::workspace::PaneId, Option<SplitDirection>)>,
         initial_input: Option<chartr_plugin::TerminalLaunch>,
+        replacement: Option<(ItemId, PathBuf)>,
         cx: &mut Context<Self>,
     ) -> gpui::Task<Result<chartr_plugin::PreparedTerminal, String>> {
         if self.starting {
@@ -1029,7 +1181,14 @@ impl Space {
 
         let client = self.client.clone();
         let workspace = self.workspace.clone();
-        let path = self.path.clone();
+        let path = replacement.as_ref().map(|(_, path)| path).unwrap_or(&self.path).clone();
+        if !path.is_dir() {
+            self.starting = false;
+            self.problem = Some(format!("{} is unavailable.", path.display()));
+            cx.notify();
+            return gpui::Task::ready(Err(self.problem.clone().unwrap()));
+        }
+        let cwd_override = replacement.as_ref().map(|_| path.to_string_lossy().into_owned());
         let label = self.name.clone();
         let create_client = client.clone();
         let executor = cx.background_executor().clone();
@@ -1038,7 +1197,9 @@ impl Space {
             let info = executor
                 .spawn(async move {
                     let info = match workspace {
-                        Some(workspace) => create_client.start_session(&workspace, None),
+                        Some(workspace) => {
+                            create_client.start_session(&workspace, cwd_override.as_deref())
+                        }
                         None => create_client.create_workspace(&path, Some(&label)),
                     }?;
                     chartr_herdr::Result::Ok(info)
@@ -1071,13 +1232,42 @@ impl Space {
                         let session = this.session_from_builder(info, builder, cx);
                         let session_id = session.id().0.clone();
                         let input = session.access();
-                        let inserted = if let Some((tab, pane, direction)) = destination {
+                        if let Some((id, _)) = &replacement
+                            && (!matches!(this.items.get(id), Some(Item::Ended(_)))
+                                || this.layout.location(*id).is_none())
+                        {
+                            let message = format!(
+                                "The ended tab {} was removed before its terminal started.",
+                                id.get()
+                            );
+                            this.problem = Some(message.clone());
+                            Self::abandon_new_session(client.clone(), session.id().clone(), cx);
+                            return Err(message);
+                        }
+                        if replacement.is_some()
+                            && let Some(launch) = &initial_input
+                            && let Err(error) = input.send_shell_launch(launch)
+                        {
+                            let message = format!("Resuming tab {session_id}: {error}");
+                            this.problem = Some(message.clone());
+                            Self::abandon_new_session(client.clone(), session.id().clone(), cx);
+                            cx.notify();
+                            return Err(message);
+                        }
+                        let inserted = if let Some((id, _)) = replacement {
+                            if matches!(this.items.get(&id), Some(Item::Ended(_))) {
+                                this.insert_session_with_id(session, Some(id))
+                            } else {
+                                None
+                            }
+                        } else if let Some((tab, pane, direction)) = destination {
                             this.insert_session_in(session, tab, pane, direction)
                         } else {
                             this.insert_session(session)
                         };
                         if let Some(id) = inserted {
-                            if let Some(launch) = &initial_input
+                            if replacement.is_none()
+                                && let Some(launch) = &initial_input
                                 && let Err(error) = input.send_shell_launch(launch)
                             {
                                 this.problem = Some(error.to_string());
@@ -1087,6 +1277,11 @@ impl Space {
                                 input.send_shell_launch(bytes).map_err(|error| error.to_string())
                             }))
                         } else {
+                            Self::abandon_new_session(
+                                client.clone(),
+                                chartr_herdr::PaneId(session_id),
+                                cx,
+                            );
                             Err("The new terminal could not be inserted into its space.".into())
                         }
                     }
@@ -1100,6 +1295,16 @@ impl Space {
             })
             .map_err(|_| "The owning space was closed.".to_owned())?
         })
+    }
+
+    fn abandon_new_session(client: Client, backend: PaneId, cx: &mut Context<Self>) {
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(error) = client.close_session(&backend) {
+                    eprintln!("chartr could not close unused terminal {}: {error}", backend.0);
+                }
+            })
+            .detach();
     }
 
     fn insert_session(&mut self, session: Session) -> Option<ItemId> {
@@ -1237,9 +1442,40 @@ impl Space {
         self.remove_item(id);
     }
 
-    /// Remove terminal items after the daemon that owned their PTYs died.
-    /// Plugin items and the space itself survive; no shell is recreated under
-    /// a dead tab's identity.
+    fn end_saved(&mut self, id: ItemId, backend: &str) {
+        let recovery =
+            self.restoring_recovery.remove(backend).unwrap_or_else(|| TerminalRecovery {
+                backend_id: backend.to_owned(),
+                title: "Terminal".into(),
+                cwd: Some(self.path.clone()),
+                agent: None,
+                native: None,
+            });
+        self.items.insert(id, Item::Ended(recovery));
+    }
+
+    fn end_item(&mut self, id: ItemId) {
+        if let Some(item) = self.items.get(&id).and_then(Item::as_session) {
+            let backend = item.session.id().clone();
+            let recovery = TerminalRecovery {
+                title: item.session.title(),
+                ..TerminalRecovery::from_session(&item.session.info)
+            };
+            self.sessions.remove(&backend);
+            self.missing_sessions.remove(&backend);
+            self.items.insert(id, Item::Ended(recovery));
+        } else if let Some(backend) = self
+            .restoring_sessions
+            .iter()
+            .find_map(|(backend, item)| (*item == id).then(|| backend.clone()))
+        {
+            self.restoring_sessions.remove(&backend);
+            self.end_saved(id, &backend);
+        }
+    }
+
+    /// Replace terminal items after the daemon that owned their PTYs died.
+    /// Plugin items and the space itself survive; no shell starts automatically.
     pub fn drop_dead_sessions(&mut self) {
         let terminal_items: Vec<_> = self
             .items
@@ -1247,11 +1483,12 @@ impl Space {
             .filter_map(|(id, item)| item.as_session().map(|_| *id))
             .chain(self.restoring_sessions.values().copied())
             .collect();
-        self.restoring_sessions.clear();
         self.attaching_sessions.clear();
         for id in terminal_items {
-            self.remove_item(id);
+            self.end_item(id);
         }
+        self.restoring_sessions.clear();
+        self.restoring_recovery.clear();
         self.workspace = None;
         self.starting = false;
         self.closing.clear();
@@ -1291,7 +1528,7 @@ impl EventEmitter<SpaceEvent> for Space {}
 
 pub fn name_for(kind: Kind, path: &std::path::Path) -> String {
     match kind {
-        Kind::AdHoc => "Free sessions".to_owned(),
+        Kind::AdHoc => "Scratch".to_owned(),
         Kind::Registered => spaces::display_name(path),
     }
 }
@@ -1315,6 +1552,363 @@ mod tests {
             conversation_title: None,
             foreground_pid: None,
             cwd: Some(path.to_owned()),
+        }
+    }
+
+    // All paths and identities in this fixture belong to a fresh temporary namespace.
+    fn recovery_fixture(root: &std::path::Path) -> PersistedSpace {
+        let mut layout = WorkspaceTabs::new();
+        let first = layout.alloc_item();
+        let group = layout.push_standalone(first).unwrap();
+        let pane = layout.active_workspace().unwrap().active_pane();
+        let right =
+            layout.workspace_mut(group).unwrap().split_pane(pane, SplitDirection::Right).unwrap();
+        let second = layout.alloc_item();
+        layout.workspace_mut(group).unwrap().add_item(second, Some(right), None).unwrap();
+        let third = layout.alloc_item();
+        layout.workspace_mut(group).unwrap().add_item(third, Some(right), None).unwrap();
+        layout.rename_tab(group, Some("Named split group".into())).unwrap();
+        let items = [first, second, third]
+            .into_iter()
+            .enumerate()
+            .map(|(index, id)| {
+                layout.rename_item(id, Some(format!("Custom tab {index}"))).unwrap();
+                let info = recovery_info(index, root);
+                PersistedItem::Terminal {
+                    item_id: id.get(),
+                    backend_id: info.id.0.clone(),
+                    recovery: Some(TerminalRecovery {
+                        title: info.title().to_owned(),
+                        ..TerminalRecovery::from_session(&info)
+                    }),
+                }
+            })
+            .collect();
+        PersistedSpace {
+            key: format!("folder:{}", root.display()),
+            name: "Custom space".into(),
+            path: Some(root.into()),
+            kind: PersistedSpaceKind::Folder,
+            layout,
+            items,
+            expanded: true,
+        }
+    }
+
+    fn recovery_info(index: usize, root: &std::path::Path) -> chartr_herdr::control::Session {
+        let mut info =
+            backend_session(&format!("saved-{index}"), &root.join(format!("cwd-{index}")));
+        info.label = format!("Backend title {index}");
+        info.agent = Some("pi".into());
+        info.agent_session = Some(chartr_herdr::protocol::AgentSession {
+            source: "synthetic-test".into(),
+            agent: "pi".into(),
+            kind: "path".into(),
+            value: root
+                .join(format!("synthetic_native-{index}.jsonl"))
+                .to_string_lossy()
+                .into_owned(),
+        });
+        info
+    }
+
+    fn fixture_space(root: &std::path::Path, cx: &mut gpui::TestAppContext) -> gpui::Entity<Space> {
+        fixture_space_at(root, root, cx)
+    }
+
+    fn fixture_space_at(
+        root: &std::path::Path,
+        path: &std::path::Path,
+        cx: &mut gpui::TestAppContext,
+    ) -> gpui::Entity<Space> {
+        let sidecar = root.join("herdr");
+        std::fs::write(&sidecar, []).unwrap();
+        let client = Client::new(
+            chartr_herdr::Sidecar::at(sidecar).unwrap(),
+            chartr_herdr::Namespace::rooted(root.join("namespace")),
+        );
+        cx.new(|cx| Space::new("Default name".into(), path.into(), Kind::Registered, client, cx))
+    }
+
+    fn insert_fixture_sessions(space: &mut Space, saved: &PersistedSpace, cx: &mut Context<Space>) {
+        for (index, saved_item) in saved.items.iter().enumerate() {
+            let id = saved.layout.item_ids().find(|id| id.get() == saved_item.item_id()).unwrap();
+            let info = recovery_info(index, saved.path.as_ref().unwrap());
+            let builder = terminal::TerminalBuilder::new_display_only(
+                Default::default(),
+                terminal::terminal_settings::AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                util::paths::PathStyle::local(),
+            );
+            // Mirror the successful attachment callback without creating a PTY/transport.
+            space.attaching_sessions.remove(&info.id);
+            space.restoring_sessions.remove(&info.id.0);
+            space.restoring_recovery.remove(&info.id.0);
+            let session = Session::from_builder(info, builder, cx);
+            assert_eq!(space.insert_session_with_id(session, Some(id)), Some(id));
+        }
+    }
+
+    fn reload_fixture(root: &std::path::Path, saved: PersistedSpace) -> PersistedSpace {
+        let path = root.join("synthetic-state.sqlite");
+        let snapshot =
+            crate::persistence::Snapshot { spaces: vec![normalized(saved)], ..Default::default() };
+        {
+            let mut store = crate::persistence::StateStore::open(&path).unwrap();
+            store.save(&snapshot).unwrap();
+        }
+        let loaded = crate::persistence::StateStore::open(&path).unwrap().load().unwrap();
+        assert_eq!(loaded, snapshot);
+        loaded.spaces.into_iter().next().unwrap()
+    }
+
+    fn normalized(mut saved: PersistedSpace) -> PersistedSpace {
+        saved.items.sort_by_key(PersistedItem::item_id);
+        saved
+    }
+
+    fn ended_fixture(saved: &PersistedSpace) -> PersistedSpace {
+        let mut expected = saved.clone();
+        expected.items = saved
+            .items
+            .iter()
+            .map(|item| match item {
+                PersistedItem::Terminal { item_id, recovery: Some(recovery), .. } => {
+                    PersistedItem::Ended { item_id: *item_id, recovery: recovery.clone() }
+                }
+                _ => panic!("fixture must have recovery"),
+            })
+            .collect();
+        expected.items.sort_by_key(PersistedItem::item_id);
+        expected
+    }
+
+    #[gpui::test]
+    fn saved_custom_space_name_is_restored(cx: &mut gpui::TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        let saved = recovery_fixture(root.path());
+        let space = fixture_space(root.path(), cx);
+        space.update(cx, |space, _| {
+            space.restore_saved(&saved);
+            assert_eq!(space.name(), saved.name);
+            assert_eq!(normalized(space.persisted()), normalized(saved));
+        });
+    }
+
+    #[gpui::test]
+    fn confirmed_absence_retains_named_split_tabs_and_recovery(cx: &mut gpui::TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        let saved = recovery_fixture(root.path());
+        let space = fixture_space(root.path(), cx);
+        space.update(cx, |space, cx| {
+            space.restore_saved(&saved);
+            // Isolate deletion from the independent saved-name regression.
+            space.name = saved.name.clone();
+            insert_fixture_sessions(space, &saved, cx);
+            let ids: Vec<_> = saved.layout.item_ids().collect();
+            for id in &ids[..2] {
+                space.items.get_mut(id).unwrap().as_session_mut().unwrap().session.mark_ended();
+            }
+            space.adopt(vec![], cx);
+            assert!(ids.iter().all(|id| matches!(space.item(*id), Some(Item::Session(_)))));
+            assert_eq!(normalized(space.persisted()), normalized(saved.clone()));
+            assert_eq!(space.missing_sessions.len(), 2);
+            assert!(space.missing_sessions.values().all(|count| *count == 1));
+            space.adopt(vec![], cx);
+            for id in &ids[..2] {
+                assert!(
+                    matches!(space.item(*id), Some(Item::Ended(_))),
+                    "confirmed absence must retain the tab at its stable id"
+                );
+                let saved_item =
+                    saved.items.iter().find(|item| item.item_id() == id.get()).unwrap();
+                let PersistedItem::Terminal { backend_id, .. } = saved_item else {
+                    panic!("fixture must contain terminals");
+                };
+                let backend = PaneId(backend_id.clone());
+                assert!(!space.owns_session(&backend));
+                assert!(!space.missing_sessions.contains_key(&backend));
+            }
+            assert!(
+                matches!(space.item(ids[2]), Some(Item::Session(_))),
+                "a live local attachment is not conclusive absence"
+            );
+            let mut expected = ended_fixture(&saved);
+            let live = saved.items.iter().find(|item| item.item_id() == ids[2].get()).unwrap();
+            let expected_live =
+                expected.items.iter_mut().find(|item| item.item_id() == ids[2].get()).unwrap();
+            *expected_live = live.clone();
+            assert_eq!(normalized(space.persisted()), normalized(expected.clone()));
+            for _ in 0..3 {
+                space.adopt(vec![], cx);
+            }
+            assert_eq!(normalized(space.persisted()), normalized(expected));
+            assert!(!space.starting);
+            assert!(space.attaching_sessions.is_empty());
+            assert!(space.restoring_sessions.is_empty());
+            assert!(space.reattaching.is_empty());
+            assert!(space.restoring_recovery.is_empty());
+            assert!(space.retired_sessions.is_empty());
+            assert!(space.missing_sessions.is_empty());
+            assert_eq!(space.sessions.len(), 1);
+        });
+    }
+
+    fn assert_no_pending_launch(space: &Space) {
+        assert!(!space.starting);
+        assert!(space.attaching_sessions.is_empty());
+        assert!(space.restoring_sessions.is_empty());
+        assert!(space.restoring_recovery.is_empty());
+        assert!(space.reattaching.is_empty());
+    }
+
+    fn assert_recovery_roundtrip(saved: PersistedSpace, cx: &mut gpui::TestAppContext) {
+        let store_root = tempfile::tempdir().unwrap();
+        let loaded = reload_fixture(store_root.path(), saved.clone());
+        let space_root = tempfile::tempdir().unwrap();
+        // Reconstruct the same space identity with a fresh client namespace
+        // and entity, as the app does when reopening a saved space.
+        let fresh = fixture_space_at(space_root.path(), loaded.path.as_ref().unwrap(), cx);
+        fresh.update(cx, |space, cx| {
+            space.restore_saved(&loaded);
+            assert_eq!(normalized(space.persisted()), normalized(saved.clone()));
+            space.adopt(vec![], cx);
+            assert_eq!(normalized(space.persisted()), normalized(saved));
+            assert!(space.sessions.is_empty());
+            assert!(space.missing_sessions.is_empty());
+            assert!(space.retired_sessions.is_empty());
+            assert_no_pending_launch(space);
+        });
+    }
+
+    #[gpui::test]
+    fn live_backend_loss_roundtrips_named_recovery_tabs(cx: &mut gpui::TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        let saved = recovery_fixture(root.path());
+        let space = fixture_space(root.path(), cx);
+        let ended = space.update(cx, |space, cx| {
+            space.restore_saved(&saved);
+            insert_fixture_sessions(space, &saved, cx);
+            assert_eq!(normalized(space.persisted()), normalized(saved.clone()));
+            for item in &saved.items {
+                let PersistedItem::Terminal { recovery: Some(recovery), .. } = item else {
+                    panic!("fixture must have recovery");
+                };
+                assert_eq!(recovery.agent.as_deref(), Some("pi"));
+                let native = recovery.native.as_ref().expect("native identity must be populated");
+                assert!(native.path.as_ref().unwrap().starts_with(root.path()));
+                assert!(!native.id.is_empty());
+            }
+            space.drop_dead_sessions();
+            assert_eq!(normalized(space.persisted()), ended_fixture(&saved));
+            assert!(space.sessions.is_empty());
+            assert!(space.missing_sessions.is_empty());
+            assert_no_pending_launch(space);
+            space.persisted()
+        });
+        assert_recovery_roundtrip(ended, cx);
+    }
+
+    #[gpui::test]
+    fn startup_absence_roundtrips_named_recovery_tabs(cx: &mut gpui::TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        let saved = recovery_fixture(root.path());
+        let store_root = tempfile::tempdir().unwrap();
+        let loaded = reload_fixture(store_root.path(), saved.clone());
+        let space = fixture_space(root.path(), cx);
+        let ended = space.update(cx, |space, cx| {
+            space.restore_saved(&loaded);
+            assert_eq!(normalized(space.persisted()), normalized(saved.clone()));
+            space.adopt(vec![], cx);
+            assert_eq!(normalized(space.persisted()), ended_fixture(&saved));
+            assert_no_pending_launch(space);
+            space.persisted()
+        });
+        assert_recovery_roundtrip(ended, cx);
+    }
+
+    #[gpui::test]
+    fn surviving_restored_attachments_keep_named_layout_and_ids(cx: &mut gpui::TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        let saved = recovery_fixture(root.path());
+        let space = fixture_space(root.path(), cx);
+        space.update(cx, |space, cx| {
+            space.restore_saved(&saved);
+            let infos: Vec<_> =
+                (0..saved.items.len()).map(|index| recovery_info(index, root.path())).collect();
+            // Prevent real transport: represent the existing attach-in-progress
+            // state, then synthesize its successful display-only callback.
+            space.attaching_sessions.extend(infos.iter().map(|info| info.id.clone()));
+            space.adopt(infos.clone(), cx);
+            space.adopt(vec![], cx);
+            assert_eq!(normalized(space.persisted()), normalized(saved.clone()));
+            for info in &infos {
+                assert!(space.owns_session(&info.id));
+            }
+            insert_fixture_sessions(space, &saved, cx);
+            space.adopt(infos.clone(), cx);
+            assert_eq!(normalized(space.persisted()), normalized(saved));
+            assert_no_pending_launch(space);
+            for info in &infos {
+                assert!(space.owns_session(&info.id));
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn dismissed_closed_and_bulk_closed_tabs_stay_absent_after_reload(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for mode in 0..3 {
+            let root = tempfile::tempdir().unwrap();
+            let saved = recovery_fixture(root.path());
+            let space = fixture_space(root.path(), cx);
+            let ids: Vec<_> = saved.layout.item_ids().collect();
+            let closed = if mode == 2 { ids[..2].to_vec() } else { vec![ids[0]] };
+            let remaining = space.update(cx, |space, cx| {
+                space.restore_saved(&saved);
+                insert_fixture_sessions(space, &saved, cx);
+                match mode {
+                    0 => {
+                        space.drop_dead_sessions();
+                        space.dismiss_ended(closed[0], cx);
+                    }
+                    1 => {
+                        space.drop_dead_sessions();
+                        space.close_item(closed[0], cx);
+                    }
+                    _ => {
+                        // Mirror the completed backend-close callback; do not
+                        // send a close request to any sidecar.
+                        space.finish_bulk_close(&closed);
+                        let stale = saved
+                            .items
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, item)| closed.iter().any(|id| id.get() == item.item_id()))
+                            .map(|(index, _)| recovery_info(index, root.path()))
+                            .collect();
+                        space.adopt(stale, cx);
+                        assert!(space.attaching_sessions.is_empty());
+                        space.drop_dead_sessions();
+                    }
+                }
+                for id in &closed {
+                    assert!(space.item(*id).is_none());
+                    assert!(space.layout.location(*id).is_none());
+                    assert!(space.layout.item_name(*id).is_none());
+                }
+                let mut expected = ended_fixture(&saved);
+                for id in &closed {
+                    expected.layout.remove_item(*id).unwrap();
+                }
+                expected.items.retain(|item| !closed.iter().any(|id| id.get() == item.item_id()));
+                assert_eq!(normalized(space.persisted()), normalized(expected));
+                space.persisted()
+            });
+            assert_recovery_roundtrip(remaining, cx);
         }
     }
 
@@ -1347,9 +1941,11 @@ mod tests {
                 .split_pane(pane, SplitDirection::Right)
                 .unwrap();
             saved.layout.workspace_mut(tab).unwrap().move_item(item, right, None).unwrap();
-            saved
-                .items
-                .push(PersistedItem::Terminal { item_id: item.get(), backend_id: "saved".into() });
+            saved.items.push(PersistedItem::Terminal {
+                item_id: item.get(),
+                backend_id: "saved".into(),
+                recovery: None,
+            });
             space.restore_saved(&saved);
             let backend = PaneId("saved".into());
             assert!(space.owns_session(&backend));
@@ -1362,6 +1958,112 @@ mod tests {
             assert_eq!(space.persisted().layout, saved.layout);
             assert_eq!(space.persisted().items, saved.items);
             assert_eq!(space.attaching_sessions.len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn daemon_loss_ends_saved_tabs_but_dismiss_removes_them(cx: &mut gpui::TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        let sidecar = root.path().join("herdr");
+        std::fs::write(&sidecar, []).unwrap();
+        let client = Client::new(
+            chartr_herdr::Sidecar::at(sidecar).unwrap(),
+            chartr_herdr::Namespace::rooted(root.path().join("namespace")),
+        );
+        let space = cx.new(|cx| {
+            Space::new("Project".into(), root.path().into(), Kind::Registered, client, cx)
+        });
+        space.update(cx, |space, cx| {
+            let mut saved = space.persisted();
+            let id = saved.layout.alloc_item();
+            saved.layout.push_standalone(id).unwrap();
+            saved.items.push(PersistedItem::Terminal {
+                item_id: id.get(), backend_id: "lost".into(),
+                recovery: Some(TerminalRecovery {
+                    backend_id: "lost".into(), title: "Agent tab".into(),
+                    cwd: Some(root.path().to_owned()), agent: Some("pi".into()), native: None,
+                }),
+            });
+            space.restore_saved(&saved);
+            space.drop_dead_sessions();
+            assert!(matches!(space.item(id), Some(Item::Ended(recovery)) if recovery.title == "Agent tab"));
+            assert_eq!(space.persisted().layout, saved.layout);
+            let ended = space.persisted();
+            space.restore_saved(&ended);
+            assert!(matches!(space.item(id), Some(Item::Ended(_))));
+            space.dismiss_ended(id, cx);
+            assert!(space.item(id).is_none());
+            let result = futures::executor::block_on(space.reopen_ended(id, None, cx));
+            assert!(result.err().unwrap().contains("no longer ended"));
+            assert!(space.persisted().items.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn backend_death_ends_live_tabs_but_normal_retirement_removes_them(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let sidecar = root.path().join("herdr");
+        std::fs::write(&sidecar, []).unwrap();
+        let client = Client::new(
+            chartr_herdr::Sidecar::at(sidecar).unwrap(),
+            chartr_herdr::Namespace::rooted(root.path().join("namespace")),
+        );
+        let space = cx.new(|cx| {
+            Space::new("Project".into(), root.path().into(), Kind::Registered, client, cx)
+        });
+        space.update(cx, |space, cx| {
+            for backend in ["lost", "exited"] {
+                let builder = terminal::TerminalBuilder::new_display_only(
+                    Default::default(),
+                    terminal::terminal_settings::AlternateScroll::On,
+                    None,
+                    0,
+                    cx.background_executor(),
+                    util::paths::PathStyle::local(),
+                );
+                let session =
+                    Session::from_builder(backend_session(backend, root.path()), builder, cx);
+                space.insert_session(session).unwrap();
+            }
+            let exited = space.sessions[&PaneId("exited".into())];
+            space.retire_item(exited);
+            assert!(space.item(exited).is_none());
+            let lost = space.sessions[&PaneId("lost".into())];
+            let position = space.layout.location(lost);
+            space.drop_dead_sessions();
+            assert!(matches!(space.item(lost), Some(Item::Ended(_))));
+            assert_eq!(space.layout.location(lost), position);
+            assert!(space.item(exited).is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn startup_missing_terminal_becomes_ended(cx: &mut gpui::TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        let sidecar = root.path().join("herdr");
+        std::fs::write(&sidecar, []).unwrap();
+        let client = Client::new(
+            chartr_herdr::Sidecar::at(sidecar).unwrap(),
+            chartr_herdr::Namespace::rooted(root.path().join("namespace")),
+        );
+        let space = cx.new(|cx| {
+            Space::new("Project".into(), root.path().into(), Kind::Registered, client, cx)
+        });
+        space.update(cx, |space, cx| {
+            let mut saved = space.persisted();
+            let id = saved.layout.alloc_item();
+            saved.layout.push_standalone(id).unwrap();
+            saved.items.push(PersistedItem::Terminal {
+                item_id: id.get(),
+                backend_id: "lost".into(),
+                recovery: None,
+            });
+            space.restore_saved(&saved);
+            space.adopt(vec![], cx);
+            assert!(matches!(space.item(id), Some(Item::Ended(_))));
+            assert!(space.persisted().layout.location(id).is_some());
         });
     }
 
@@ -1409,7 +2111,7 @@ mod tests {
     }
 
     #[test]
-    fn an_ended_session_needs_two_missing_snapshots_before_removal() {
+    fn an_ended_attachment_needs_two_missing_snapshots_before_confirmation() {
         let missing = PaneId("w1:p1".to_owned());
         let present = PaneId("w1:p2".to_owned());
         let live = PaneId("w1:p3".to_owned());
@@ -1483,13 +2185,7 @@ mod tests {
             chartr_herdr::Namespace::rooted(temporary.path().join("namespace")),
         );
         let space = cx.new(|cx| {
-            Space::new(
-                "Free sessions".to_owned(),
-                temporary.path().to_owned(),
-                Kind::AdHoc,
-                client,
-                cx,
-            )
+            Space::new("Scratch".to_owned(), temporary.path().to_owned(), Kind::AdHoc, client, cx)
         });
         let first = space.update(cx, |space, cx| space.open_plugin_launcher(cx));
         let (tab, pane) = cx.read(|cx| space.read(cx).workspace_tabs().location(first).unwrap());
@@ -1575,13 +2271,7 @@ mod tests {
             chartr_herdr::Namespace::rooted(temporary.path().join("namespace")),
         );
         let space = cx.new(|cx| {
-            Space::new(
-                "Free sessions".to_owned(),
-                temporary.path().to_owned(),
-                Kind::AdHoc,
-                client,
-                cx,
-            )
+            Space::new("Scratch".to_owned(), temporary.path().to_owned(), Kind::AdHoc, client, cx)
         });
         let launcher = space.update(cx, |space, cx| space.open_plugin_launcher(cx));
         let before = cx.read(|cx| space.read(cx).workspace_tabs().location(launcher));

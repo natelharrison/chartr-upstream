@@ -8,9 +8,12 @@ use ui::prelude::*;
 use super::DraggedSidebar;
 use crate::mode::Mode;
 
-const MIN_WIDTH: f32 = 108.;
+/// B Minimal keeps the space tree comfortably legible without letting it
+/// consume the workspace. The Inbox has its own lower bound because chat
+/// previews need a little more room than a space name.
+const MIN_WIDTH: f32 = 164.;
 pub(crate) const INBOX_MIN_WIDTH: f32 = 120.;
-const MAX_WIDTH: f32 = 480.;
+const MAX_WIDTH: f32 = 250.;
 const RESIZE_DURATION: Duration = Duration::from_millis(250);
 
 pub(crate) struct SidebarPane {
@@ -88,7 +91,9 @@ pub(crate) fn render(
         .w(px(width))
         .h_full()
         .flex_none()
-        .bg(cx.theme().colors().panel_background)
+        // The sidebar lives on the window's outer canvas. Painting it as a
+        // full-height panel leaves a straight slab behind the inset workspace.
+        .bg(cx.theme().colors().background)
         .when_some(controls, |pane, (space_switcher, view_menu)| {
             pane.child(
                 h_flex()
@@ -125,20 +130,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn inbox_expands_the_shared_pane_and_keeps_its_width_on_return() {
+    fn sidebar_keeps_a_readable_width_when_switching_to_inbox() {
         let now = Instant::now();
         let mut pane = SidebarPane::new(108., Mode::Sidebar);
         pane.set_mode(Mode::Inbox, now);
-        assert_eq!(pane.width(), INBOX_MIN_WIDTH);
-        assert_eq!(pane.advance(now, false), (108., true));
+        assert_eq!(pane.width(), MIN_WIDTH);
+        assert_eq!(pane.advance(now, false), (164., false));
         let (midway, animating) = pane.advance(now + RESIZE_DURATION / 2, false);
-        assert!(animating && midway > 108. && midway < INBOX_MIN_WIDTH);
-        // Rapid mode changes must not jump back or restart the expansion.
+        assert!(!animating && midway == 164.);
+        // Rapid mode changes must not collapse the space tree below its floor.
         pane.set_mode(Mode::Sidebar, now + RESIZE_DURATION / 2);
-        assert_eq!(pane.advance(now + RESIZE_DURATION / 2, false), (midway, true));
-        assert_eq!(pane.advance(now + RESIZE_DURATION, false), (INBOX_MIN_WIDTH, false));
+        assert_eq!(pane.advance(now + RESIZE_DURATION / 2, false), (midway, false));
+        assert_eq!(pane.advance(now + RESIZE_DURATION, false), (MIN_WIDTH, false));
         pane.set_mode(Mode::Inbox, now + RESIZE_DURATION);
-        assert_eq!(pane.advance(now + RESIZE_DURATION, false), (INBOX_MIN_WIDTH, false));
+        assert_eq!(pane.advance(now + RESIZE_DURATION, false), (MIN_WIDTH, false));
     }
 
     #[test]
@@ -146,7 +151,7 @@ mod tests {
         let now = Instant::now();
         let mut pane = SidebarPane::new(400., Mode::Sidebar);
         pane.set_mode(Mode::Inbox, now);
-        assert_eq!(pane.advance(now, false), (400., false));
+        assert_eq!(pane.advance(now, false), (MAX_WIDTH, false));
         let mut restored = SidebarPane::new(108., Mode::Inbox);
         assert_eq!(restored.advance(now, false), (INBOX_MIN_WIDTH, false));
     }
@@ -157,7 +162,7 @@ mod tests {
         let mut pane = SidebarPane::new(108., Mode::Sidebar);
         pane.set_mode(Mode::Inbox, now);
         pane.resize(410., Mode::Inbox);
-        assert_eq!(pane.advance(now, false), (410., false));
+        assert_eq!(pane.advance(now, false), (MAX_WIDTH, false));
         pane.resize(50., Mode::Inbox);
         assert_eq!(pane.width(), INBOX_MIN_WIDTH);
         pane.resize(50., Mode::Sidebar);
@@ -171,7 +176,7 @@ mod tests {
         let now = Instant::now();
         let mut pane = SidebarPane::new(108., Mode::Sidebar);
         pane.set_mode(Mode::Inbox, now);
-        assert_eq!(pane.advance(now, true), (INBOX_MIN_WIDTH, false));
-        assert_eq!(pane.advance(now, false), (INBOX_MIN_WIDTH, false));
+        assert_eq!(pane.advance(now, true), (164., false));
+        assert_eq!(pane.advance(now, false), (164., false));
     }
 }

@@ -63,10 +63,11 @@ impl Plugin for AgentPlugin {
     }
 
     fn services(&self) -> Vec<chartr_plugin::services::ServiceExport> {
-        use chartr_plugin::services::{Agents, InboxAgents, ServiceExport};
+        use chartr_plugin::services::{Agents, InboxAgents, ResumeAgents, ServiceExport};
         let listing = self.registry.downgrade();
         let preparing = listing.clone();
         let conversations = listing.clone();
+        let resuming = listing.clone();
         vec![
             ServiceExport::new(Agents::new(
                 move |cx| {
@@ -91,6 +92,22 @@ impl Plugin for AgentPlugin {
                     opening_input(agent, prompt)
                 },
             )),
+            ServiceExport::new(ResumeAgents::new(move |provider, argument, cx| {
+                let registry = resuming.upgrade().ok_or("Agent is unavailable.")?;
+                let registry = registry.read(cx);
+                if let Some(error) = &registry.problem {
+                    return Err(error.clone());
+                }
+                let mut candidates = registry.agents.iter().filter(|agent| {
+                    registered_provider(agent).is_some_and(|candidate| candidate.slug() == provider)
+                });
+                let agent =
+                    candidates.next().ok_or("No registered agent matches this provider.")?;
+                if candidates.next().is_some() {
+                    return Err("More than one registered agent matches this provider.".into());
+                }
+                resume_input(agent, provider, argument)
+            })),
             ServiceExport::new(InboxAgents::new(move |name, cx| {
                 let registry = conversations.upgrade().ok_or("Agent is unavailable.")?;
                 let registry = registry.read(cx);
@@ -1022,6 +1039,31 @@ fn opening_input(
     Ok(chartr_plugin::TerminalLaunch { command: line, input })
 }
 
+fn registered_provider(agent: &AgentRecord) -> Option<chartr_agent::Provider> {
+    chartr_agent::Provider::executable(agent.adapter.trim())
+        .or_else(|| chartr_agent::Provider::detect(&agent.name))
+}
+
+fn resume_input(
+    agent: &AgentRecord,
+    provider: &str,
+    argument: &str,
+) -> Result<chartr_plugin::TerminalLaunch, String> {
+    reject_nul("resume identity", argument)?;
+    let words: &[&str] = match provider {
+        "pi" => &["--session"],
+        "claude" => &["--resume"],
+        "codex" => &["resume"],
+        _ => return Err("This agent does not support resume here.".into()),
+    };
+    let mut launch = opening_input(agent, "")?;
+    for word in words.iter().copied().chain(std::iter::once(argument)) {
+        launch.command.push(' ');
+        launch.command.push_str(&shell_quoted(word));
+    }
+    Ok(launch)
+}
+
 fn inbox_input(agent: &AgentRecord) -> Result<chartr_plugin::services::InboxLaunch, String> {
     let integration = chartr_agent::Provider::executable(agent.adapter.trim())
         .map(|provider| provider.slug().to_owned());
@@ -1216,6 +1258,40 @@ mod tests {
                 assert!(input.contains(&shell_quoted(&executable)), "{alias}: {input}");
                 assert!(input.contains("saved") && input.contains("AGENT_MODE='work'"));
             }
+        }
+    }
+
+    #[test]
+    fn a_named_pi_wrapper_keeps_its_registered_launcher() {
+        let mut agent =
+            record("/custom/bin/start-my-agent", &["--profile", "custom"], &[], "default");
+        agent.name = "Pi".into();
+        assert_eq!(registered_provider(&agent), Some(chartr_agent::Provider::Pi));
+        let command = resume_input(&agent, "pi", "/tmp/exact session.jsonl").unwrap().command;
+        assert!(command.starts_with("'/custom/bin/start-my-agent' '--profile' 'custom'"));
+        assert!(command.ends_with("'--session' '/tmp/exact session.jsonl'"));
+    }
+
+    #[test]
+    fn resume_uses_registered_launcher_and_quotes_native_identity() {
+        for (provider, flag) in [("pi", "--session"), ("claude", "--resume"), ("codex", "resume")] {
+            let agent = record(
+                &format!("/custom/bin/{provider}"),
+                &["--model", "saved profile"],
+                &[],
+                "default",
+            );
+            let identity = "/folder/it's a session.jsonl";
+            let command = resume_input(&agent, provider, identity).unwrap().command;
+            assert_eq!(
+                command,
+                format!(
+                    "{} {} {}",
+                    opening_input(&agent, "").unwrap().command,
+                    shell_quoted(flag),
+                    shell_quoted(identity)
+                )
+            );
         }
     }
 

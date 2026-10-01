@@ -9,6 +9,22 @@ impl Conversations {
         self.services = services;
     }
 
+    pub fn registered_agent_names(&self, cx: &App) -> Result<Vec<String>, String> {
+        self.services
+            .get::<Agents>(AGENT_SERVICE)
+            .ok_or("Enable Agent and register an agent first.")?
+            .list(cx)
+    }
+
+    pub fn begin_active_space_conversation(
+        &mut self,
+        name: String,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let space = self.active_space.clone().ok_or("Choose an active space first.")?;
+        self.begin_conversation(name, space, cx)
+    }
+
     pub(super) fn agent_picker(&self, prominent: bool, cx: &Context<Self>) -> AnyElement {
         let weak = cx.weak_entity();
         let popup = ui::PopoverMenu::new(if prominent {
@@ -94,6 +110,89 @@ impl Conversations {
         if self.new_agent.as_deref() == Some(name) {
             self.select_runtime(runtime, cx);
         }
+    }
+}
+
+#[cfg(test)]
+mod quick_agent_tests {
+    use super::*;
+    use chartr_plugin::{TerminalLaunch, services::ServiceExport};
+    use gpui::TestAppContext;
+    use std::{cell::RefCell, rc::Rc};
+
+    fn services(names: &[&str]) -> Services {
+        let services = Services::default();
+        let names = names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
+        services.publish(
+            AGENT_SERVICE,
+            vec![ServiceExport::new(Agents::new(
+                move |_| Ok(names.clone()),
+                |name, _, _| {
+                    Ok(TerminalLaunch { command: format!("synthetic-{name}"), input: vec![] })
+                },
+            ))],
+        );
+        services
+    }
+
+    fn inbox(cx: &mut Context<Conversations>, services: Services) -> Conversations {
+        let mut inbox =
+            Conversations::with_store(None, Err(anyhow::anyhow!("fixture: no store")), cx);
+        inbox.problem = None;
+        inbox.connected = true;
+        inbox.services = services;
+        inbox.spaces = vec![
+            SpaceChoice { key: "a".into(), name: "A".into(), path: None },
+            SpaceChoice { key: "b".into(), name: "B".into(), path: None },
+        ];
+        inbox.active_space = Some("b".into());
+        inbox
+    }
+
+    #[gpui::test]
+    fn quick_agent_uses_exact_name_and_active_space(cx: &mut TestAppContext) {
+        let view = cx.new(|cx| inbox(cx, services(&["Work harness", "Other"])));
+        let launches = Rc::new(RefCell::new(Vec::new()));
+        let observed = launches.clone();
+        cx.update(|cx| {
+            cx.subscribe(&view, move |_, event, _| {
+                if let Event::LaunchAgent { name, space } = event {
+                    observed.borrow_mut().push((name.clone(), space.clone()));
+                }
+            })
+            .detach();
+        });
+        view.update(cx, |view, cx| {
+            assert_eq!(
+                view.registered_agent_names(cx).unwrap(),
+                vec!["Work harness".to_owned(), "Other".to_owned()]
+            );
+            view.begin_active_space_conversation("Work harness".into(), cx).unwrap();
+        });
+        assert_eq!(launches.borrow().as_slice(), &[("Work harness".into(), "b".into())]);
+    }
+
+    #[gpui::test]
+    fn quick_agent_revalidates_state_and_registration(cx: &mut TestAppContext) {
+        let registry = services(&["Work harness"]);
+        let view = cx.new(|cx| inbox(cx, registry.clone()));
+        view.update(cx, |view, cx| {
+            assert_eq!(
+                view.begin_active_space_conversation("Missing".into(), cx).unwrap_err(),
+                "The selected agent is no longer registered."
+            );
+            view.connected = false;
+            assert_eq!(
+                view.begin_active_space_conversation("Work harness".into(), cx).unwrap_err(),
+                "Wait for the terminal service to connect."
+            );
+            view.connected = true;
+            view.active_space = None;
+            assert_eq!(
+                view.begin_active_space_conversation("Work harness".into(), cx).unwrap_err(),
+                "Choose an active space first."
+            );
+        });
     }
 }
 

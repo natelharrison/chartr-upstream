@@ -1,5 +1,10 @@
 # Inbox
 
+> **Testing limit:** Chats was changed in this personal fork but has not been
+> properly tested end to end. This document describes the implementation, not
+> verified behavior across all providers or platforms. The fork has only been
+> tested on macOS.
+
 Choose **Chats** in the window’s view selector, or **Switch to Chats view** in the command palette
 (`Cmd+Shift+3` on macOS, `Ctrl+Shift+3` on Linux). Existing Conversations view
 preferences migrate to Inbox with the same selected history entry. Existing custom `workspace.conversation_mode` shortcuts remain valid.
@@ -70,7 +75,7 @@ and restart. Desktop IDE conversation discovery is outside the terminal-based
 Inbox workflow. Cursor, Antigravity and OMP have fixture coverage but still need
 live verification with functioning installations.
 
-Inbox always lists conversations from all spaces, including Free sessions,
+Inbox always lists conversations from all spaces, including Scratch,
 with newest conversations first. Sidebar and Inbox have no title-bar space
 picker. Each compact row shows its status, title, and timestamp on one line.
 Hover for the full title, agent adapter, owning space, and working directory.

@@ -113,8 +113,11 @@ pub struct ListSorter<K> {
     slides: HashMap<K, Slide>,
     held: Option<HeldItem<K>>,
     pressed_at: Option<Pixels>,
+    drag_lane_bounds: Option<Bounds<Pixels>>,
     scroll: ScrollHandle,
     last_tick: Option<Instant>,
+    /// Fixed rows after the sortable items in the same scroll list.
+    trailing: usize,
 }
 
 impl<K: Clone + Eq + std::hash::Hash> Default for ListSorter<K> {
@@ -126,8 +129,10 @@ impl<K: Clone + Eq + std::hash::Hash> Default for ListSorter<K> {
             slides: HashMap::new(),
             held: None,
             pressed_at: None,
+            drag_lane_bounds: None,
             scroll: ScrollHandle::new(),
             last_tick: None,
+            trailing: 0,
         }
     }
 }
@@ -139,6 +144,12 @@ impl<K: Clone + Eq + std::hash::Hash> ListSorter<K> {
 
     pub fn with_axis(gap: Rems, axis: SortAxis) -> Self {
         Self { gap, axis, ..Self::default() }
+    }
+
+    /// Account for fixed rows, such as "New space", that end the scroll list.
+    pub fn with_trailing(mut self, rows: usize) -> Self {
+        self.trailing = rows;
+        self
     }
 
     /// External changes invalidate a drag's snapshot, even when only the order changes.
@@ -156,6 +167,14 @@ impl<K: Clone + Eq + std::hash::Hash> ListSorter<K> {
 
     pub fn press(&mut self, at: Pixels) {
         self.pressed_at = Some(at);
+    }
+
+    pub fn set_drag_lane_bounds(&mut self, bounds: Bounds<Pixels>) {
+        self.drag_lane_bounds = Some(bounds);
+    }
+
+    pub fn release_is_in_drag_lane(&self, point: Point<Pixels>) -> bool {
+        self.drag_lane_bounds.is_some_and(|bounds| bounds.contains(&point))
     }
 
     pub fn holds(&self, item: K) -> bool {
@@ -297,6 +316,7 @@ impl<K: Clone + Eq + std::hash::Hash> ListSorter<K> {
     pub fn cancel(&mut self) {
         self.held = None;
         self.pressed_at = None;
+        self.drag_lane_bounds = None;
         self.slides.clear();
         self.last_tick = None;
     }
@@ -314,7 +334,7 @@ impl<K: Clone + Eq + std::hash::Hash> ListSorter<K> {
 
     fn geometry(&mut self) -> Option<Vec<(K, Bounds<Pixels>)>> {
         let order = self.held.as_ref()?.order.clone();
-        if self.scroll.children_count() != order.len() {
+        if self.scroll.children_count() != order.len() + self.trailing {
             return None;
         }
         let scroll_offset = self.axis.coordinate(self.scroll.offset());

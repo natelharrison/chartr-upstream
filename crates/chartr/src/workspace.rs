@@ -757,6 +757,9 @@ pub struct WorkspaceTabs {
     activation_history: Vec<WorkspaceTabId>,
     next_tab_id: u64,
     next_item_id: u64,
+    /// Names the user gave individual pane tabs, replacing their live titles.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    item_names: BTreeMap<ItemId, String>,
 }
 
 #[derive(Deserialize)]
@@ -771,6 +774,8 @@ struct WorkspaceTabsFields {
     next_tab_id: u64,
     #[serde(default)]
     next_item_id: u64,
+    #[serde(default)]
+    item_names: BTreeMap<ItemId, String>,
     #[serde(default)]
     center: Option<PaneGroup>,
     #[serde(default)]
@@ -807,6 +812,7 @@ impl<'de> Deserialize<'de> for WorkspaceTabs {
                     activation_history: vec![id],
                     next_tab_id: 2,
                     next_item_id: 1,
+                    item_names: BTreeMap::new(),
                 }
             }
         } else {
@@ -816,6 +822,7 @@ impl<'de> Deserialize<'de> for WorkspaceTabs {
                 activation_history: fields.activation_history,
                 next_tab_id: fields.next_tab_id,
                 next_item_id: fields.next_item_id,
+                item_names: fields.item_names,
             }
         };
         tabs.normalize();
@@ -837,10 +844,13 @@ impl WorkspaceTabs {
             activation_history: Vec::new(),
             next_tab_id: 1,
             next_item_id: 1,
+            item_names: BTreeMap::new(),
         }
     }
 
     fn normalize(&mut self) {
+        let items: HashSet<_> = self.tabs.iter().flat_map(|tab| tab.layout.item_ids()).collect();
+        self.item_names.retain(|item, name| items.contains(item) && !name.trim().is_empty());
         for tab in &mut self.tabs {
             tab.name = tab.name.take().and_then(|name| {
                 let name = name.trim();
@@ -967,6 +977,20 @@ impl WorkspaceTabs {
         Ok(())
     }
 
+    /// Give one pane tab its own name, or clear it with `None` or blank text.
+    pub fn rename_item(&mut self, item: ItemId, name: Option<String>) -> Result<(), ModelError> {
+        self.location(item).ok_or(ModelError::ItemNotFound(item))?;
+        match name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
+            Some(name) => self.item_names.insert(item, name.to_owned()),
+            None => self.item_names.remove(&item),
+        };
+        Ok(())
+    }
+
+    pub fn item_name(&self, item: ItemId) -> Option<&str> {
+        self.item_names.get(&item).map(String::as_str)
+    }
+
     pub fn move_tab(&mut self, tab: WorkspaceTabId, destination: usize) -> Result<(), ModelError> {
         let source = self
             .tabs
@@ -1036,6 +1060,7 @@ impl WorkspaceTabs {
     pub fn remove_item(&mut self, item: ItemId) -> Result<(), ModelError> {
         let (tab, _) = self.location(item).ok_or(ModelError::ItemNotFound(item))?;
         self.workspace_mut(tab).expect("known workspace tab").remove_item(item)?;
+        self.item_names.remove(&item);
         self.remove_tab_if_empty(tab);
         Ok(())
     }
@@ -1200,6 +1225,48 @@ mod tests {
     }
 
     #[test]
+    fn activating_layouts_restores_each_complete_pane_tree_and_active_item() {
+        let mut tabs = WorkspaceTabs::new();
+        let first_item = tabs.alloc_item();
+        let first_layout = tabs.push_standalone(first_item).unwrap();
+        let second_item = tabs.alloc_item();
+        let first_pane = tabs.workspace(first_layout).unwrap().active_pane();
+        tabs.workspace_mut(first_layout)
+            .unwrap()
+            .add_item(second_item, Some(first_pane), None)
+            .unwrap();
+        let split_pane = tabs
+            .workspace_mut(first_layout)
+            .unwrap()
+            .split_pane(first_pane, SplitDirection::Right)
+            .unwrap();
+        let split_item = tabs.alloc_item();
+        tabs.workspace_mut(first_layout)
+            .unwrap()
+            .add_item(split_item, Some(split_pane), None)
+            .unwrap();
+        tabs.workspace_mut(first_layout).unwrap().activate_item(split_item).unwrap();
+        let first_tree = tabs.workspace(first_layout).unwrap().clone();
+
+        let other_item = tabs.alloc_item();
+        let other_layout = tabs.push_standalone(other_item).unwrap();
+        tabs.activate_tab(first_layout).unwrap();
+        assert_eq!(tabs.active_item(), Some(split_item));
+        assert_eq!(tabs.active_workspace(), Some(&first_tree));
+
+        tabs.activate_tab(other_layout).unwrap();
+        assert_eq!(tabs.active_item(), Some(other_item));
+        tabs.activate_tab(first_layout).unwrap();
+        assert_eq!(tabs.active_item(), Some(split_item));
+        assert_eq!(tabs.active_workspace(), Some(&first_tree));
+
+        let restored: WorkspaceTabs =
+            serde_json::from_str(&serde_json::to_string(&tabs).unwrap()).unwrap();
+        assert_eq!(restored, tabs);
+        restored.validate().unwrap();
+    }
+
+    #[test]
     fn ungrouping_restores_items_as_outer_tabs_in_pane_and_tab_order() {
         let mut tabs = WorkspaceTabs::new();
         let items: Vec<_> = (0..5).map(|_| tabs.alloc_item()).collect();
@@ -1328,6 +1395,53 @@ mod tests {
 
         assert_eq!(restored.tab(group).unwrap().name(), None);
         assert!(!serde_json::to_string(&restored).unwrap().contains("\"name\""));
+        restored.validate().unwrap();
+    }
+
+    #[test]
+    fn renamed_pane_tabs_survive_reload_and_clear_on_close() {
+        let mut tabs = WorkspaceTabs::new();
+        let first = tabs.alloc_item();
+        let second = tabs.alloc_item();
+        tabs.push_standalone(first).unwrap();
+        tabs.push_standalone(second).unwrap();
+        tabs.rename_item(first, Some("  Server  ".into())).unwrap();
+        tabs.rename_item(second, Some("Logs".into())).unwrap();
+        tabs.rename_item(second, Some("   ".into())).unwrap();
+        assert_eq!(tabs.item_name(second), None);
+
+        let restored: WorkspaceTabs =
+            serde_json::from_str(&serde_json::to_string(&tabs).unwrap()).unwrap();
+        assert_eq!(restored.item_name(first), Some("Server"));
+
+        tabs.remove_item(first).unwrap();
+        assert_eq!(tabs.item_name(first), None);
+        assert!(tabs.rename_item(first, Some("Gone".into())).is_err());
+    }
+
+    #[test]
+    fn renamed_surface_tabs_keep_their_order_after_reload() {
+        let mut tabs = WorkspaceTabs::new();
+        let terminal = tabs.alloc_item();
+        let surface = tabs.alloc_item();
+        let other_surface = tabs.alloc_item();
+        let terminal_tab = tabs.push_standalone(terminal).unwrap();
+        let surface_tab = tabs.push_standalone(surface).unwrap();
+        let other_tab = tabs.push_standalone(other_surface).unwrap();
+        tabs.rename_tab(surface_tab, Some("  Tasks  ".into())).unwrap();
+        tabs.rename_tab(other_tab, Some("Notes".into())).unwrap();
+        tabs.move_tab(other_tab, 0).unwrap();
+        tabs.move_tab(terminal_tab, 2).unwrap();
+
+        let restored: WorkspaceTabs =
+            serde_json::from_str(&serde_json::to_string(&tabs).unwrap()).unwrap();
+        assert_eq!(
+            restored.tabs().iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            vec![other_tab, surface_tab, terminal_tab]
+        );
+        assert_eq!(restored.tab(surface_tab).unwrap().name(), Some("Tasks"));
+        assert_eq!(restored.tab(other_tab).unwrap().name(), Some("Notes"));
+        assert_eq!(restored.active_tab_id(), tabs.active_tab_id());
         restored.validate().unwrap();
     }
 

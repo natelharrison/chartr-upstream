@@ -34,8 +34,8 @@ plugin state live in chartr's SQLite state store. A pre-outer-tab pane tree
 migrates to one grouped outer entry. The rewrite deliberately does not import or
 mutate older chartr registries.
 
-Free sessions are the one synthetic space. They use the operator's home
-directory and have no registry row. A registered home-directory row is not
+Scratch is the one synthetic space. It uses the operator's home
+directory and has no registry row. A registered home-directory row is not
 drawn beside it because herdr has one workspace per directory; two labels over
 one backend workspace would pretend to be independent state when they are not.
 

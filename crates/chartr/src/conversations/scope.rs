@@ -26,7 +26,7 @@ impl Conversations {
                 .as_deref()
                 .and_then(Path::file_name)
                 .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Free sessions".into())
+                .unwrap_or_else(|| "Scratch".into())
         })
     }
 }
@@ -96,7 +96,7 @@ mod tests {
         let mut row = legacy("/work/app/src");
         row.space = Some(chartr_conversations::SpaceIdentity {
             key: "ad-hoc".into(),
-            name: "Free sessions".into(),
+            name: "Scratch".into(),
         });
         assert_eq!(owner_key(&row, &[space("/work/app")]), "ad-hoc");
         assert_eq!(owner_key(&row, &[]), "ad-hoc");

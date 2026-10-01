@@ -6,11 +6,11 @@ pub(super) const TITLE_CONTROLS_LEFT: f32 = 78.;
 pub(super) const TITLE_CONTROLS_RIGHT: f32 = 6.;
 pub(super) const SPACE_SWITCHER_MAX_WIDTH: f32 = 200.;
 pub(super) const TITLE_BRAND_RESERVED_WIDTH: f32 = 60.;
-const TITLE_BRAND_WIDTH: f32 = 52.;
-const TITLE_BRAND_HEIGHT: f32 = 15.;
+pub(crate) const TITLE_BRAND_WIDTH: f32 = 52.;
+pub(crate) const TITLE_BRAND_HEIGHT: f32 = 15.;
 // macOS places the traffic-light centers one logical pixel above the center
 // of our 34 px title-bar surface.
-const TITLE_CONTROLS_TOP: f32 = -1.;
+pub(crate) const TITLE_CONTROLS_TOP: f32 = -1.;
 
 // Measure a separate tree so the displayed controls retain their normal layout
 // lifecycle. Max-content measurement includes the current font, scale and notices.
@@ -59,12 +59,71 @@ impl WorkspaceWindow {
         h_flex()
             .flex_none()
             .gap_1()
+            .children(self.needs_you_chip(on.clone(), cx))
             .when(show_picker, |controls| controls.child(self.presentation_toggle(on.clone())))
             .when(!notices.is_empty(), |controls| {
                 controls.child(self.error_menu(notices.clone(), cx))
             })
             .child(self.settings_button(on))
             .into_any_element()
+    }
+
+    /// The one window-wide "needs you" signal: a static amber count of agents
+    /// blocked on the user. Its menu jumps to each agent, then lists working ones.
+    fn needs_you_chip(&self, on: chrome::Emit, cx: &Context<Self>) -> Option<AnyElement> {
+        let notices: Vec<_> = self
+            .spaces
+            .iter()
+            .flat_map(|space| space.read(cx).agent_notices(space.entity_id()))
+            .collect();
+        let waiting = notices.iter().filter(|notice| notice.waiting).count();
+        if waiting == 0 {
+            return None;
+        }
+        let label =
+            if waiting == 1 { "1 needs you".to_owned() } else { format!("{waiting} need you") };
+        let warning = cx.theme().status().warning;
+        let chip = PopupMenu::new("needs-you")
+            .trigger_with_tooltip(
+                ButtonLike::new("needs-you-trigger")
+                    .height(crate::design::ICON_BUTTON.into())
+                    .size(ButtonSize::None)
+                    .style(ButtonStyle::Transparent)
+                    .aria_label(label.clone())
+                    .child(crate::design::status_chip(IconName::BellRing, label, warning)),
+                Tooltip::text("Agents waiting on you"),
+            )
+            .menu(move |window, cx| {
+                let notices = notices.clone();
+                let on = on.clone();
+                Some(ContextMenu::build_popup(window, cx, move |mut menu| {
+                    let mut working = false;
+                    for notice in notices {
+                        if !notice.waiting && !working {
+                            working = true;
+                            menu = menu.separator().header("Working");
+                        }
+                        let label = match &notice.detail {
+                            Some(detail) => format!("{} — {detail}", notice.title),
+                            None => notice.title.clone(),
+                        };
+                        let open = on.clone();
+                        let (space, item) = (notice.space, notice.item);
+                        let action = move |window: &mut Window, cx: &mut App| {
+                            open(Action::Select { space: Some(space), item }, window, cx)
+                        };
+                        menu = match notice.icon_path {
+                            Some(path) if path.starts_with("icons/") => {
+                                menu.entry_with_icon_path(label, path, action)
+                            }
+                            Some(path) => menu.entry_with_external_icon_path(label, path, action),
+                            None => menu.entry(label, None, move |window, cx| action(window, cx)),
+                        };
+                    }
+                    menu.popup_width(px(320.))
+                }))
+            });
+        Some(chip.into_any_element())
     }
 
     /// Linux keeps the native window decorations and places app controls in
@@ -106,7 +165,7 @@ impl WorkspaceWindow {
             .w_full()
             .h(px(crate::title_bar::HEIGHT))
             .flex_none()
-            .bg(cx.theme().colors().panel_background)
+            .bg(cx.theme().colors().background)
             .into_any_element();
         let foreground = h_flex()
             .id("linux-app-bar")
@@ -313,7 +372,6 @@ impl WorkspaceWindow {
                     .disabled(notices.is_empty()),
                 Tooltip::text(label),
             )
-            .anchor(Anchor::TopRight)
             .menu(move |window, cx| {
                 if notices.is_empty() {
                     return None;
@@ -461,12 +519,16 @@ impl WorkspaceWindow {
                 ),
             ],
         )
+        .soft_inset()
         .into_any_element()
     }
 
     pub(super) fn settings_button(&self, on: chrome::Emit) -> AnyElement {
-        IconButton::new("open-settings", IconName::Settings)
-            .icon_size(IconSize::Small)
+        ButtonLike::new("open-settings")
+            .width(crate::design::ICON_BUTTON)
+            .height(crate::design::ICON_BUTTON.into())
+            .size(ButtonSize::None)
+            .child(Icon::new(IconName::Settings).size(IconSize::Small).color(Color::Muted))
             .aria_label("Settings")
             .tooltip(Tooltip::text("Settings"))
             .on_click(move |_, window, cx| on(Action::OpenSettings, window, cx))
@@ -484,15 +546,15 @@ impl WorkspaceWindow {
             return (self.title_bar.clone().into_any_element(), gpui::Empty.into_any_element());
         }
 
-        let background = cx.theme().colors().panel_background;
+        // The title bar and sidebar form one outer canvas around the inset
+        // workspace. Painting either as a panel creates a visible seam.
+        let background = cx.theme().colors().background;
         let window_active = window.is_window_active();
         let title_bar = div()
             .id("workspace-title-bar-background")
             .relative()
             .w_full()
             .h(px(crate::title_bar::HEIGHT))
-            // Pull the tab strip into the title bar's spare bottom spacing.
-            .mb(px(-4. * visibility.tabs))
             .flex_none()
             .child(self.title_bar.clone())
             .child(div().absolute().inset_0().bg(background))
@@ -527,6 +589,8 @@ impl WorkspaceWindow {
                     .inset_0(),
                 )
             });
+        // Full screen hides the traffic lights, so the brand moves to the edge.
+        let controls_left = if window.is_fullscreen() { 14. } else { TITLE_CONTROLS_LEFT };
         if let Some((space_switcher, view_menu, show_brand)) = controls {
             // Keep the brand paint-only: without an id or listeners it inserts
             // no hitbox, so the underlying title bar still owns window dragging.
@@ -534,7 +598,7 @@ impl WorkspaceWindow {
                 bar.child(
                     h_flex()
                         .absolute()
-                        .left(px(TITLE_CONTROLS_LEFT))
+                        .left(px(controls_left))
                         .top(px(TITLE_CONTROLS_TOP))
                         .h(px(crate::title_bar::HEIGHT))
                         .when(!window_active, |brand| brand.opacity(0.65))
@@ -551,7 +615,7 @@ impl WorkspaceWindow {
                     h_flex()
                         .absolute()
                         // Clear the native macOS traffic-light cluster.
-                        .left(px(TITLE_CONTROLS_LEFT
+                        .left(px(controls_left
                             + if show_brand { TITLE_BRAND_RESERVED_WIDTH } else { 0. }))
                         .top(px(TITLE_CONTROLS_TOP))
                         .h(px(crate::title_bar::HEIGHT))
@@ -577,41 +641,59 @@ impl WorkspaceWindow {
 
     pub(super) fn new_item_button(&self, cx: &Context<Self>) -> AnyElement {
         let weak = cx.weak_entity();
-        let button = chrome::new_item_button("new-item")
-            .icon_color(Color::Muted)
+        let menu_owner = weak.clone();
+        let agents = self.agent_choices(cx);
+        let button = ButtonLike::new("new-item")
+            .width(crate::design::ICON_BUTTON)
+            .height(crate::design::ICON_BUTTON.into())
+            .size(ButtonSize::None)
+            .style(ButtonStyle::Subtle)
             .aria_label("New terminal session")
             .tooltip(Tooltip::text("New terminal session"))
+            .child(Icon::new(IconName::Plus).size(IconSize::Small).color(Color::Muted))
             .on_click(move |_, window, cx| {
                 let _ = weak.update(cx, |this, cx| this.act(Action::New, window, cx));
             })
             .into_any_element();
-        chrome::new_item_drag_handle(
+        let terminal = chrome::new_item_drag_handle(
             "new-item",
             self.active.as_ref().map(Entity::entity_id),
             chrome::NewItemKind::Terminal,
             button,
-        )
-    }
-
-    pub(super) fn new_plugin_pane_button(&self, cx: &Context<Self>) -> AnyElement {
-        let weak = cx.weak_entity();
-        let button = chrome::new_plugin_pane_button_with_color(
-            "new-plugin-pane",
-            IconSize::Small,
-            Color::Muted,
-        )
-        .on_click(move |_, window, cx| {
-            let _ = weak.update(cx, |this, cx| {
-                this.act(Action::NewPluginPane, window, cx);
+        );
+        // The one create menu shared with space rows and pane bars.
+        let Some(space) = self.active.as_ref().map(Entity::entity_id) else {
+            return h_flex().gap(px(2.)).child(terminal).into_any_element();
+        };
+        let surfaces = self.surface_options();
+        let create = PopupMenu::new("new-surface-menu")
+            .trigger_with_tooltip(
+                ButtonLike::new("new-surface-menu-trigger")
+                    .width(crate::design::ICON_BUTTON)
+                    .height(crate::design::ICON_BUTTON.into())
+                    .size(ButtonSize::None)
+                    .style(ButtonStyle::Subtle)
+                    .selected_style(ButtonStyle::Tinted(ui::TintColor::Accent))
+                    .aria_label("Start agent or surface")
+                    .child(
+                        Icon::from_path(crate::assets::PLUGIN_LAUNCHER_ICON_PATH)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    ),
+                Tooltip::text("Start agent or surface"),
+            )
+            .menu(move |window, cx| {
+                let owner = menu_owner.clone();
+                let on: chrome::Emit = Rc::new(move |action, window, cx| {
+                    let _ = owner.update(cx, |this, cx| this.act(action, window, cx));
+                });
+                let agents = agents.clone();
+                let surfaces = surfaces.clone();
+                Some(ContextMenu::build_popup(window, cx, move |menu| {
+                    chrome::create_menu(menu, space, &agents, &surfaces, on)
+                }))
             });
-        })
-        .into_any_element();
-        chrome::new_item_drag_handle(
-            "new-plugin-pane",
-            self.active.as_ref().map(Entity::entity_id),
-            chrome::NewItemKind::Plugin,
-            button,
-        )
+        h_flex().gap(px(2.)).child(terminal).child(create).into_any_element()
     }
 }
 

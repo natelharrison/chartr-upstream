@@ -12,12 +12,18 @@ pub struct Assets;
 
 /// The shared icon for every entry point and placeholder associated with opening a plugin pane.
 pub const PLUGIN_LAUNCHER_ICON_PATH: &str = "icons/full_screen.svg";
+pub const CREATE_TERMINAL_ICON_PATH: &str = "icons/create_terminal.svg";
+pub const CREATE_AGENT_ICON_PATH: &str = "icons/create_agent.svg";
+pub const BROWSE_SURFACES_ICON_PATH: &str = "icons/browse_surfaces.svg";
 pub const TITLE_BRAND_PATH: &str = "icons/title_brand.svg";
 pub const BRAND_ICON_PATH: &str = "images/chartr.png";
 
 /// Icons chartr draws, by the path `IconName::path` derives.
 const ICONS: &[(&str, &str)] = &[
     ("icons/plus.svg", include_str!("../assets/icons/plus.svg")),
+    (CREATE_TERMINAL_ICON_PATH, include_str!("../assets/icons/create_terminal.svg")),
+    (CREATE_AGENT_ICON_PATH, include_str!("../assets/icons/create_agent.svg")),
+    (BROWSE_SURFACES_ICON_PATH, include_str!("../assets/icons/browse_surfaces.svg")),
     (PLUGIN_LAUNCHER_ICON_PATH, include_str!("../assets/icons/full_screen.svg")),
     (TITLE_BRAND_PATH, include_str!("../assets/icons/title_brand.svg")),
     ("icons/close.svg", include_str!("../assets/icons/close.svg")),

@@ -150,6 +150,10 @@ impl Conversations {
         self.selected.as_deref()
     }
 
+    pub fn rows(&self) -> &[Conversation] {
+        &self.rows
+    }
+
     pub fn selected_row(&self) -> Option<&Conversation> {
         self.selected.as_ref().and_then(|id| self.rows.iter().find(|row| &row.id == id))
     }
@@ -427,7 +431,7 @@ mod tests {
                 inbox
             });
             cx.observe(&inbox, |_, _, cx| cx.notify()).detach();
-            InboxHarness { inbox, sidebar: sidebar_pane::SidebarPane::new(320., Mode::Inbox) }
+            InboxHarness { inbox, sidebar: sidebar_pane::SidebarPane::new(160., Mode::Inbox) }
         });
         let inbox = harness.read_with(cx, |harness, _| harness.inbox.clone());
         terminal.update(cx, |terminal, cx| terminal.write_output(b"Inbox terminal content", cx));
@@ -439,7 +443,8 @@ mod tests {
         });
         let first_width = terminal
             .read_with(cx, |terminal, _| terminal.last_content().terminal_bounds.bounds.size.width);
-        assert!(first_width > px(600.) && first_width < px(710.));
+        // The terminal fills what the 160px sidebar leaves, less its own padding.
+        assert!(first_width > px(800.) && first_width < px(840.), "{first_width:?}");
         cx.simulate_resize(size(px(1200.), px(600.)));
         cx.run_until_parked();
         let next_width = terminal
@@ -450,18 +455,18 @@ mod tests {
         );
 
         // The shared divider must receive drags above the terminal and obey Inbox's minimum.
-        let divider = point(px(323.), px(250.));
-        let wider = point(px(440.), px(250.));
+        let divider = point(px(163.), px(250.));
+        let wider = point(px(240.), px(250.));
         cx.simulate_mouse_down(divider, MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_move(wider, MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_move(wider, MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_up(wider, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
-        assert_eq!(harness.read_with(cx, |harness, _| harness.sidebar.width()), 440.);
+        assert_eq!(harness.read_with(cx, |harness, _| harness.sidebar.width()), 240.);
         let narrower_terminal = terminal
             .read_with(cx, |terminal, _| terminal.last_content().terminal_bounds.bounds.size.width);
-        assert!(narrower_terminal < next_width - px(100.));
-        let divider = point(px(443.), px(250.));
+        assert!(narrower_terminal < next_width - px(60.));
+        let divider = point(px(243.), px(250.));
         let narrower = point(px(50.), px(250.));
         cx.simulate_mouse_down(divider, MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_move(narrower, MouseButton::Left, Modifiers::none());
@@ -475,7 +480,7 @@ mod tests {
 
         // Both history tabs remain usable at the minimum width and leave the
         // selected session's terminal mounted while changing the list filter.
-        cx.simulate_click(point(px(90.), px(12.)), Modifiers::none());
+        cx.simulate_click(point(px(66.), px(12.)), Modifiers::none());
         cx.run_until_parked();
         assert!(inbox.read_with(cx, |inbox, _| inbox.show_archived));
         assert_eq!(inbox.read_with(cx, |inbox, cx| inbox.terminal(cx)), Some(terminal.clone()));

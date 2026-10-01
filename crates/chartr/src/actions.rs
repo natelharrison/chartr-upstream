@@ -68,6 +68,11 @@ pub fn init(keymap: &KeymapStore, cx: &mut App) {
     // Select All, which TerminalView handles explicitly).
     cx.bind_keys(upstream_terminal_bindings(cx));
 
+    // A browser-style second key for a new terminal. Bound first so any user
+    // binding on the same chord takes precedence.
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([KeyBinding::new("cmd-t", workspace::NewTerminal, Some(WORKSPACE_CONTEXT))]);
+
     cx.bind_keys(
         KeymapAction::ALL
             .into_iter()

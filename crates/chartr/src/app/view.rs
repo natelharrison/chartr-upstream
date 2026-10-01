@@ -42,9 +42,10 @@ impl Render for WorkspaceWindow {
         let error_notices = self.error_notices(cx);
         let mut sidebar_spaces = self.sidebar_spaces(cx);
         self.space_sorter.arrange(&mut sidebar_spaces, |space| space.id);
+        let sidebar_agents = self.agent_choices(cx);
+        let sidebar_surfaces = self.surface_options();
         let chrome_entries: &[Entry] = &entries;
         let new_item = self.new_item_button(cx);
-        let new_plugin_pane = self.new_plugin_pane_button(cx);
         let (background, text, workspace_background) = {
             let colors = cx.theme().colors();
             (colors.background, colors.text, colors.editor_background)
@@ -53,32 +54,18 @@ impl Render for WorkspaceWindow {
         let on_action =
             cx.listener(|this, action: &Action, window, cx| this.act(action.clone(), window, cx));
         let emit: chrome::Emit = Rc::new(move |action, window, cx| on_action(&action, window, cx));
+        // Tabs lists every space in its strip, so the title bar keeps the brand
+        // instead of a space switcher.
         let title_controls = cfg!(target_os = "macos").then(|| {
-            let space_switcher_width = if chrome_visibility.tabs > 0. {
-                window_chrome::chrome_controls_width(
-                    self.visible_space_switcher(chrome_visibility.tabs, window, cx),
-                    window,
-                    cx,
-                )
-                .min(px(window_chrome::SPACE_SWITCHER_MAX_WIDTH))
-                    + window.rem_size() * 0.25
-            } else {
-                px(0.)
-            };
             let (end_controls, show_brand) = self.title_bar_end_controls(
                 emit.clone(),
                 error_notices.clone(),
                 window.viewport_size().width
-                    - px(window_chrome::TITLE_CONTROLS_LEFT + window_chrome::TITLE_CONTROLS_RIGHT)
-                    - space_switcher_width,
+                    - px(window_chrome::TITLE_CONTROLS_LEFT + window_chrome::TITLE_CONTROLS_RIGHT),
                 window,
                 cx,
             );
-            (
-                self.visible_space_switcher(chrome_visibility.tabs, window, cx),
-                end_controls,
-                show_brand,
-            )
+            (gpui::Empty.into_any_element(), end_controls, show_brand)
         });
         let (title_bar, title_bar_foreground) =
             self.workspace_title_bar(title_controls, chrome_visibility, window, cx);
@@ -94,10 +81,6 @@ impl Render for WorkspaceWindow {
             })
             .unzip();
 
-        // Dissolve the left divider as it meets the native window edge. Tie the
-        // fade to distance so interrupted slides and reduced motion stay in sync.
-        let edge_distance = (sidebar_width * chrome_visibility.sidebar / 32.).clamp(0., 1.);
-        let left_border_opacity = edge_distance * edge_distance * (3. - 2. * edge_distance);
         let workspace = v_flex()
             .id("mode-workspace")
             .relative()
@@ -106,18 +89,6 @@ impl Render for WorkspaceWindow {
             .h_full()
             .overflow_hidden()
             .bg(workspace_background)
-            // Keep the top frame and reserve the left divider's pixel throughout
-            // the fade so terminal content never shifts when the border vanishes.
-            .border_t_1()
-            .pl(px(1.))
-            .border_color(cx.theme().colors().border)
-            .child(
-                div().absolute().left_0().top_0().bottom_0().w(px(1.)).bg(cx
-                    .theme()
-                    .colors()
-                    .border
-                    .opacity(left_border_opacity)),
-            )
             .child(if self.mode == Mode::Inbox {
                 self.conversations.clone().into_any_element()
             } else {
@@ -127,55 +98,52 @@ impl Render for WorkspaceWindow {
                 workspace.children(self.terminal_search_overlay(cx))
             });
 
-        let tab_height = chrome::tabs::height(cx);
-        // Keep one layout and one workspace subtree throughout the transition.
-        // Fixed-size surfaces slide as their layout slots shrink, so labels never
-        // squash. Tabs overflow upward beneath the title bar gradient and controls.
+        let full_surface =
+            matches!(self.settings.resolved().work_surface, crate::settings::WorkSurface::Full);
+        // The strip sits on the canvas above the surface and opens downward
+        // as the sidebar closes. Inset leaves a gap below it; Full is flush.
+        let (strip_height, strip_gap) =
+            if full_surface { (chrome::tabs::HEIGHT + 4., 0.) } else { (chrome::tabs::HEIGHT, 6.) };
         let tab_slot = div()
             .id("mode-tab-slot")
             .relative()
             .w_full()
-            .h(tab_height * chrome_visibility.tabs)
+            .h(px((strip_height + strip_gap) * chrome_visibility.tabs))
             .flex_none()
+            .overflow_hidden()
             .when(chrome_visibility.tabs > 0., |slot| {
-                let controls = (!cfg!(any(target_os = "macos", target_os = "linux"))).then(|| {
-                    (
-                        self.visible_space_switcher(1., window, cx),
+                let end_control =
+                    (!cfg!(any(target_os = "macos", target_os = "linux"))).then(|| {
                         self.chrome_end_controls(
                             emit.clone(),
                             error_notices.clone(),
-                            window.viewport_size().width
-                                - px(window_chrome::SPACE_SWITCHER_MAX_WIDTH)
-                                - chrome::ItemTab::min_width(true, cx)
-                                - window.rem_size() * 5.,
+                            window.viewport_size().width * 0.4,
                             window,
                             cx,
-                        ),
-                    )
-                });
+                        )
+                    });
                 slot.child(
-                    div()
+                    h_flex()
                         .absolute()
-                        .top(tab_height * (chrome_visibility.tabs - 1.))
+                        .top_0()
                         .left_0()
                         .w_full()
-                        .h(tab_height)
-                        // Leave a visible trail after the quick initial slide,
-                        // then dissolve it completely before removing the strip.
-                        .opacity(chrome_visibility.tabs.sqrt())
+                        .h(px(strip_height))
+                        .when(full_surface, |strip| strip.px(px(8.)))
+                        .opacity(chrome_visibility.tabs)
                         .child(chrome::tabs::render(
+                            &sidebar_spaces,
                             chrome_entries,
-                            controls,
+                            end_control,
                             new_item,
-                            new_plugin_pane,
+                            chrome_visibility.tabs,
                             emit.clone(),
                             window,
                             cx,
                         ))
                         .when(self.mode != Mode::Tabs, |strip| {
-                            // The outgoing strip is visual only. Cover its full
-                            // moving bounds to block clicks, drags, hover and scroll
-                            // immediately, while title-bar controls stay above it.
+                            // The outgoing strip is visual only. Block clicks,
+                            // drags, hover and scroll immediately.
                             strip.child(div().absolute().inset_0().occlude())
                         }),
                 )
@@ -220,8 +188,11 @@ impl Render for WorkspaceWindow {
                                 .h_full()
                                 .child(chrome::sidebar::render(
                                     &sidebar_spaces,
+                                    &sidebar_agents,
+                                    &sidebar_surfaces,
                                     emit.clone(),
                                     &self.space_sorter,
+                                    self.inline_rename_rows().as_ref(),
                                     window,
                                     cx,
                                 ))
@@ -259,12 +230,53 @@ impl Render for WorkspaceWindow {
                         .child(chrome::sidebar_pane::render(sidebar_width, controls, contents, cx)),
                 )
             });
-        let body = v_flex()
-            .w_full()
-            .flex_1()
+        let inset =
+            matches!(self.settings.resolved().work_surface, crate::settings::WorkSurface::Inset);
+        let surface = v_flex()
+            .size_full()
             .min_h_0()
-            .child(tab_slot)
-            .child(h_flex().w_full().flex_1().min_h_0().child(sidebar_slot).child(workspace));
+            .overflow_hidden()
+            .border_color(cx.theme().colors().border.opacity(0.72));
+        let surface = match self.settings.resolved().work_surface {
+            crate::settings::WorkSurface::Inset => surface
+                .border_1()
+                .rounded(crate::design::RADIUS_PANEL)
+                .shadow(vec![gpui::BoxShadow {
+                    color: gpui::black().opacity(0.12),
+                    offset: gpui::point(px(0.), px(12.)),
+                    blur_radius: px(26.),
+                    spread_radius: px(0.),
+                    inset: false,
+                }]),
+            // Full rounds only the corner that meets the sidebar, never a window
+            // edge; the corner and the sidebar divider leave with the sidebar.
+            crate::settings::WorkSurface::Full => surface
+                .border_t_1()
+                .when(chrome_visibility.sidebar > 0., |surface| surface.border_l_1())
+                .rounded_tl(rems(0.5 * chrome_visibility.sidebar)),
+        };
+        let surface_frame = v_flex().flex_1().min_w_0().h_full();
+        let surface_frame = match self.settings.resolved().work_surface {
+            // The left inset opens with Tabs, as the sidebar closes.
+            crate::settings::WorkSurface::Inset => {
+                surface_frame.pl(px(6. * chrome_visibility.tabs)).pr(px(6.)).pb(px(6.))
+            }
+            crate::settings::WorkSurface::Full => surface_frame,
+        };
+        let body = h_flex().w_full().flex_1().min_h_0().child(sidebar_slot).child(
+            surface_frame.child(tab_slot).child(
+                div().relative().flex_1().min_h_0().w_full().child(surface.child(workspace)).when(
+                    inset,
+                    |surface| {
+                        let colors = cx.theme().colors();
+                        surface.children(rounded_corner_masks(
+                            colors.background,
+                            colors.border.opacity(0.72),
+                        ))
+                    },
+                ),
+            ),
+        );
 
         if self.mode_focus_pending {
             self.mode_focus_pending = false;
@@ -464,4 +476,62 @@ impl Render for WorkspaceWindow {
             .children(app_bar_foreground)
             .children(rename)
     }
+}
+
+impl WorkspaceWindow {
+    /// Surfaces a create menu can open directly; session-bound plugins need
+    /// a terminal first, so they stay behind "More surfaces…".
+    pub(super) fn surface_options(&self) -> Vec<chrome::SurfaceOption> {
+        self.catalog
+            .panes()
+            .into_iter()
+            .filter_map(|pane| {
+                let plugin = self.catalog.get(&pane.key.plugin)?;
+                if plugin.capabilities().session_binding {
+                    return None;
+                }
+                Some(chrome::SurfaceOption {
+                    title: pane.title.clone(),
+                    key: pane.key.clone(),
+                    icon_path: plugin.icon_path().to_string_lossy().into_owned().into(),
+                    external_icon: true,
+                })
+            })
+            .collect()
+    }
+}
+
+/// GPUI clips children to rectangles, so pane bars and terminals would poke
+/// square corners past the inset surface's rounded edge. Paint the canvas in a
+/// quarter ring over each corner, then redraw the border above the content.
+pub(crate) fn rounded_corner_masks(canvas: gpui::Hsla, border: gpui::Hsla) -> Vec<AnyElement> {
+    const RADIUS: f32 = 10.; // design::RADIUS_PANEL
+    const RING: f32 = 6.;
+    let corner = |top: bool, left: bool| {
+        let ring = div()
+            .absolute()
+            .size(px((RADIUS + RING) * 2.))
+            .rounded(px(RADIUS + RING))
+            .border_6()
+            .border_color(canvas);
+        let ring = if top { ring.top_0() } else { ring.bottom_0() };
+        let ring = if left { ring.left_0() } else { ring.right_0() };
+        let clip = div().absolute().size(px(RADIUS + RING)).overflow_hidden();
+        let clip = if top { clip.top(px(-RING)) } else { clip.bottom(px(-RING)) };
+        let clip = if left { clip.left(px(-RING)) } else { clip.right(px(-RING)) };
+        clip.child(ring).into_any_element()
+    };
+    vec![
+        corner(true, true),
+        corner(true, false),
+        corner(false, true),
+        corner(false, false),
+        div()
+            .absolute()
+            .inset_0()
+            .rounded(px(RADIUS))
+            .border_1()
+            .border_color(border)
+            .into_any_element(),
+    ]
 }

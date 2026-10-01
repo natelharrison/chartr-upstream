@@ -182,13 +182,13 @@ impl SettingsWindow {
                 ),
                 setting_field("Font size", "Adjust the size of terminal text.", font_size),
                 setting_field(
-                    "Free sessions directory",
-                    "Choose the working directory used when a Free session starts.",
+                    "Scratch directory",
+                    "Choose the working directory used when a Scratch session starts.",
                     settings_button("choose-free-sessions-directory", directory)
                         .start_icon(Icon::new(IconName::FolderOpen).color(Color::Muted))
                         .end_icon(Icon::new(IconName::ChevronRight).color(Color::Muted))
                         .truncate(true)
-                        .tooltip(Tooltip::text("Choose Free sessions directory"))
+                        .tooltip(Tooltip::text("Choose Scratch directory"))
                         .on_click(choose_directory),
                 ),
                 setting_field(
