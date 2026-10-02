@@ -46,7 +46,7 @@ const FRAME_SIDE: f32 = 56.;
 const FRAME_TOP: f32 = 38.;
 const FRAME_BOTTOM: f32 = 74.;
 const WINDOW_RADIUS: f32 = 16.;
-// The shadow is the window shape under a Gaussian blur, moved down.
+// The shadow is the window's rectangle under a Gaussian blur, moved down.
 const SHADOW_ALPHA: f32 = 0.71;
 const SHADOW_SIGMA: f32 = 20.;
 const SHADOW_OFFSET_Y: f32 = 18.;
@@ -150,16 +150,28 @@ fn lab_settings_button() -> impl IntoElement {
         .child(Icon::new(IconName::Settings).size(IconSize::Small).color(Color::Muted))
 }
 
+/// The title bar's amber count of agents waiting on the user; inert here.
+fn lab_needs_you_chip(waiting: usize, cx: &App) -> impl IntoElement {
+    let label = if waiting == 1 { "1 needs you".to_owned() } else { format!("{waiting} need you") };
+    ui::ButtonLike::new("lab-needs-you")
+        .height(crate::design::ICON_BUTTON.into())
+        .size(ui::ButtonSize::None)
+        .style(ui::ButtonStyle::Transparent)
+        .child(crate::design::status_chip(IconName::BellRing, label, cx.theme().status().warning))
+}
+
 /// The strip's + and ▧, as drawn by the app's `new_item_button`.
 fn lab_strip_create() -> AnyElement {
     let button = |id: &'static str, icon: Icon| {
         ui::ButtonLike::new(id)
-            .width(px(22.))
-            .height(px(22.).into())
-            .child(icon.size(IconSize::Medium).color(Color::Muted))
+            .width(crate::design::ICON_BUTTON)
+            .height(crate::design::ICON_BUTTON.into())
+            .size(ui::ButtonSize::None)
+            .style(ui::ButtonStyle::Subtle)
+            .child(icon.size(IconSize::Small).color(Color::Muted))
     };
     h_flex()
-        .gap(px(4.))
+        .gap(px(2.))
         .child(button("lab-strip-new", Icon::new(IconName::Plus)))
         .child(button("lab-strip-create", Icon::from_path(assets::PLUGIN_LAUNCHER_ICON_PATH)))
         .into_any_element()
@@ -268,7 +280,7 @@ fn frame_window(pixels: &mut [u8], width: u32, height: u32) {
     let columns: Vec<f32> = (0..width).map(|x| span(x, left, right)).collect();
     let rows: Vec<f32> = (0..height).map(|y| span(y, top + offset, bottom + offset)).collect();
 
-    for (index, pixel) in pixels.chunks_exact_mut(4).enumerate() {
+    for (index, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let (column, row) = (index % width as usize, index / width as usize);
         let (x, y) = (column as f32 + 0.5, row as f32 + 0.5);
         // Signed distance to the rounded window edge; negative inside.
@@ -290,15 +302,24 @@ fn frame_window(pixels: &mut [u8], width: u32, height: u32) {
         };
         let light = edge * (EDGE_ALPHA + (EDGE_TOP_ALPHA - EDGE_ALPHA) * up);
         let shadow = SHADOW_ALPHA * columns[column] * rows[row];
-        let behind = 1. - (1. - shadow) * (1. - OUTLINE_ALPHA * outline);
-        let alpha = coverage + behind * (1. - coverage);
-        // The shadow and outline are black, so only the window adds color.
-        for channel in &mut pixel[..3] {
-            let lit = f32::from(*channel) + (255. - f32::from(*channel)) * light;
-            *channel = if alpha > 0. { (lit * coverage / alpha).round() as u8 } else { 0 };
-        }
-        pixel[3] = (alpha * 255.).round() as u8;
+        composite(pixel, coverage, outline, light, shadow);
     }
+}
+
+/// Lay one RGBA window pixel over its frame. `coverage` and `outline` are the
+/// shares of the pixel inside the window and inside the outline; `light` is the
+/// lit share of the inner edge, already weighted by its strength. The shadow
+/// shows through the rest, and the result keeps straight alpha.
+fn composite(pixel: &mut [u8], coverage: f32, outline: f32, light: f32, shadow: f32) {
+    let covered = coverage + OUTLINE_ALPHA * outline;
+    let alpha = covered + shadow * (1. - covered);
+    // The shadow and outline are black, so only the window adds color.
+    for channel in &mut pixel[..3] {
+        let color = f32::from(*channel);
+        let premultiplied = color * coverage + (255. - color) * light;
+        *channel = if alpha > 0. { (premultiplied / alpha).round() as u8 } else { 0 };
+    }
+    pixel[3] = (alpha * 255.).round() as u8;
 }
 
 /// The standard normal CDF, from the Abramowitz and Stegun 7.1.26 error
@@ -377,7 +398,7 @@ fn capture_space_menu(
         let mut lab = UiLab::new(ids, LabMode::Spaces);
         let summary = chrome::sidebar::SpaceMenu::of(&lab.spaces[1]);
         lab.menu = Some(ContextMenu::build_lab_menu(window, cx, move |menu| {
-            chrome::sidebar::space_menu(menu.popup_width(px(260.)), &summary, Rc::new(|_, _, _| {}))
+            chrome::sidebar::space_menu(menu, &summary, Rc::new(|_, _, _| {}))
         }));
         lab
     })?;
@@ -529,11 +550,12 @@ impl UiLab {
                     removable: true,
                     available: true,
                     layouts: vec![
+                        // The pane bar shows this layout's blocked codex.
                         chrome::LayoutEntry {
                             tab: agent_tab,
                             name: None,
                             selected: true,
-                            needs_you: false,
+                            needs_you: true,
                             entry: None,
                         },
                         chrome::LayoutEntry {
@@ -574,6 +596,13 @@ impl Render for UiLab {
         let colors = cx.theme().colors().clone();
         let emit: chrome::Emit = Rc::new(|_, _, _| {});
         let tabs = self.mode == LabMode::Tabs;
+        // The app counts blocked agents; each waiting fixture layout has one.
+        let waiting = self
+            .spaces
+            .iter()
+            .flat_map(|space| &space.layouts)
+            .filter(|layout| layout.needs_you)
+            .count();
 
         let title_bar = div()
             .relative()
@@ -601,6 +630,7 @@ impl Render for UiLab {
                     .top(px(crate::app::TITLE_CONTROLS_TOP))
                     .h(px(crate::title_bar::HEIGHT))
                     .gap_1()
+                    .children((waiting > 0).then(|| lab_needs_you_chip(waiting, cx)))
                     .child(
                         crate::components::SegmentedControl::new(
                             "lab-presentation",
@@ -816,5 +846,23 @@ mod tests {
         // The inner edge is lighter than the window, and lightest along the top.
         let (top_edge, side_edge) = (at(left + 600., top), at(left, top + 400.));
         assert!(top_edge[0] > side_edge[0] && side_edge[0] > 40, "{top_edge:?} {side_edge:?}");
+    }
+
+    #[test]
+    fn composite_weights_each_band_by_its_share_of_the_pixel() {
+        // Half window and half outline: the outline's half is not thinned by
+        // the window's. Alpha 0.5 + 0.9 * 0.5 = 0.95; color 50 / 0.95.
+        let mut pixel = [100, 100, 100, 255];
+        composite(&mut pixel, 0.5, 0.5, 0., 0.);
+        assert_eq!(pixel, [53, 53, 53, 242]);
+        // A lit edge over the window's half adds only its own share:
+        // (50 + 155 * 0.1) / 0.5.
+        let mut pixel = [100, 100, 100, 255];
+        composite(&mut pixel, 0.5, 0., 0.5 * EDGE_ALPHA, 0.);
+        assert_eq!(pixel, [131, 131, 131, 128]);
+        // Outside both, only the black shadow remains.
+        let mut pixel = [100, 100, 100, 255];
+        composite(&mut pixel, 0., 0., 0., 0.4);
+        assert_eq!(pixel, [0, 0, 0, 102]);
     }
 }

@@ -10,7 +10,7 @@ terminal sessions.
 The UI-lab source at capture time has SHA-256:
 
 ```text
-31defb6ece0782149ccc05fb728df5571d7b6cddc6438db039e94e275fa23e07
+7afd560819bd07f33e5d361ca726a1cdb13ccfba18b14db8dabeb8a49689b1d8
 ```
 
 | Published image | Capture output | Pixels |
@@ -34,7 +34,9 @@ itself:
   outline, light inner edge, and drop shadow, on a transparent margin.
 
 The frame values were measured from a native macOS window capture with its
-shadow, and they match it to within a few alpha levels.
+shadow. Along the window's sides, the shadow matches that capture to within 2
+alpha levels. The harness blurs the window's rectangle rather than its rounded
+outline, and a few corner pixels differ slightly from the native curve.
 
 ## Reproduction
 
@@ -58,7 +60,9 @@ these captures were made on macOS at 2× scale.
 Each image shows one presentation as the app arranges it: Spaces shows the
 sidebar without the tab strip, and Tabs shows the strip without the sidebar. The
 terminal text is static fixture text, not a running shell. Menu actions and
-session controls are inert in the fixture.
+session controls are inert in the fixture. The lab draws the space menu inside
+the window rather than in a native popup, so the space heading that owns it is
+not tinted as it is in the app.
 
 These images do not verify terminal input, drag/drop persistence, actual agent
 launches, resume/reconnection, a computer restart, or complete **Tabs** or
