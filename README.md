@@ -59,13 +59,18 @@ restart, backend crash, agent resume, or every view transition works end to end.
 ## Screenshots
 
 These are **synthetic UI-lab captures**, not my live workspace. They render the
-current sidebar, tab controls, and native menus with generic example data.
-The workspace content is a placeholder; these images do not demonstrate a
-working terminal, or verified Tabs and Chats workflows.
+current sidebar, tab strip, and menus in the `chartrx` theme with generic
+example data. The terminal text is static fixture text, and the macOS window
+frame is drawn by the capture harness. These images do not demonstrate a working
+terminal, or verified Tabs and Chats workflows.
 
-### Workspace chrome
+### Spaces view
 
-![Synthetic Chartr Daily workspace chrome with generic spaces and tab controls](docs/assets/screenshots/workspace.png)
+![Synthetic Chartr Daily Spaces view with a sidebar of generic spaces and layouts](docs/assets/screenshots/spaces.png)
+
+### Tabs view
+
+![Synthetic Chartr Daily Tabs view with every space in one tab strip](docs/assets/screenshots/tabs.png)
 
 ### Inline layout naming
 
@@ -73,7 +78,7 @@ working terminal, or verified Tabs and Chats workflows.
 
 ### Space context menu
 
-![Synthetic native space context menu](docs/assets/screenshots/space-menu.png)
+![Synthetic space context menu open over the Spaces sidebar](docs/assets/screenshots/space-menu.png)
 
 See [capture provenance and reproduction](docs/assets/screenshots/README.md).
 

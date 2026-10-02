@@ -67,9 +67,9 @@ it does not load the user's configuration, saved workspace, or agent histories.
 See the [published screenshot provenance](assets/screenshots/README.md) for the
 exact capture command and source hash.
 
-These captures cover production chrome components with a placeholder content
-pane. They do not verify terminal input, agent launches, recovery, or complete
-Tabs and Chats behavior.
+These captures cover production chrome components around static terminal text,
+in a macOS window frame drawn by the harness. They do not verify terminal input,
+agent launches, recovery, or complete Tabs and Chats behavior.
 
 ## Completion record
 

@@ -2,8 +2,8 @@
 
 use super::*;
 
-pub(super) const TITLE_CONTROLS_LEFT: f32 = 78.;
-pub(super) const TITLE_CONTROLS_RIGHT: f32 = 6.;
+pub(crate) const TITLE_CONTROLS_LEFT: f32 = 78.;
+pub(crate) const TITLE_CONTROLS_RIGHT: f32 = 6.;
 pub(super) const SPACE_SWITCHER_MAX_WIDTH: f32 = 200.;
 pub(super) const TITLE_BRAND_RESERVED_WIDTH: f32 = 60.;
 pub(crate) const TITLE_BRAND_WIDTH: f32 = 52.;

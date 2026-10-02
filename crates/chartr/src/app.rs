@@ -27,7 +27,10 @@ mod window_chrome;
 #[cfg(feature = "ui-lab")]
 pub(crate) use view::rounded_corner_masks;
 #[cfg(feature = "ui-lab")]
-pub(crate) use window_chrome::{TITLE_BRAND_HEIGHT, TITLE_BRAND_WIDTH, TITLE_CONTROLS_TOP};
+pub(crate) use window_chrome::{
+    TITLE_BRAND_HEIGHT, TITLE_BRAND_WIDTH, TITLE_CONTROLS_LEFT, TITLE_CONTROLS_RIGHT,
+    TITLE_CONTROLS_TOP,
+};
 
 use bundled_plugins::load_plugin_catalog;
 
