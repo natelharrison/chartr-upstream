@@ -3,20 +3,22 @@
 These images were generated from the fixture-only
 [`ui-lab` capture source](../../../crates/chartr/src/ui_lab.rs), not from a live
 workspace. The fixture uses generic project names, bare settings, and the bundled
-`chartrx` theme. The capture flag returns before normal application startup, so
+Ayu Mirage theme. The capture flag returns before normal application startup, so
 it does not load personal configuration, saved state, provider history, or live
 terminal sessions.
 
 The UI-lab source at capture time has SHA-256:
 
 ```text
-7afd560819bd07f33e5d361ca726a1cdb13ccfba18b14db8dabeb8a49689b1d8
+b6214cf307abd48b5b7740425da2d7e24a8d5cd4f5fed7df0fe28a7c726a3bad
 ```
 
 | Published image | Capture output | Pixels |
 | --- | --- | --- |
 | [Spaces view](spaces.png) | `daily.png` | 2624 × 1784 |
 | [Tabs view](tabs.png) | `daily-tabs.png` | 2624 × 1784 |
+| [Spaces view, full surface](spaces-full.png) | `daily-full.png` | 2624 × 1784 |
+| [Tabs view, full surface](tabs-full.png) | `daily-tabs-full.png` | 2624 × 1784 |
 | [Inline layout rename](rename-layout.png) | `daily-rename-tab.png` | 2624 × 1784 |
 | [Space context menu](space-menu.png) | `daily-space-menu.png` | 2624 × 1784 |
 

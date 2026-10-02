@@ -553,11 +553,9 @@ mod tests {
                         let filled = colors.background.blend(colors.text.opacity(0.05));
                         if hovered { filled } else { colors.background }
                     } else {
-                        let resting = colors
-                            .background
-                            .blend(colors.tab_bar_background)
-                            .blend(colors.tab_inactive_background);
-                        if hovered { resting.blend(crate::design::hover_tint(cx)) } else { resting }
+                        // Pane tabs rest on the pane's surface.
+                        let surface = colors.editor_background;
+                        if hovered { surface.blend(colors.text.opacity(0.05)) } else { surface }
                     };
                     let gradient = gpui::linear_gradient(
                         90.,

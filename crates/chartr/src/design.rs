@@ -40,9 +40,13 @@ pub(crate) const TINT_FILL: f32 = 0.16;
 pub(crate) const TINT_BORDER: f32 = 0.35;
 /// Hover fill on tabs, switch cells and rows.
 pub(crate) const TINT_HOVER: f32 = 0.13;
-/// Quiet neutral group and hover fills for the workspace-mode switch.
-pub(crate) const TINT_MODE_GROUP: f32 = 0.035;
+/// Quiet neutral track and hover fills for the workspace-mode switch.
+pub(crate) const TINT_MODE_GROUP: f32 = 0.06;
 pub(crate) const TINT_MODE_HOVER: f32 = 0.05;
+/// Hairline around the mode switch's selected choice, over the text color.
+pub(crate) const TINT_MODE_EDGE: f32 = 0.1;
+/// Selected pane-tab fill, over the text color. Hover uses the 0.05 row fill.
+pub(crate) const TINT_TAB_SELECTED: f32 = 0.08;
 
 /// The hover fill for tabs, switch cells and rows: a faint wash of the info color.
 pub(crate) fn hover_tint(cx: &App) -> Hsla {

@@ -20,7 +20,7 @@ use crate::{
 };
 use chartr_herdr::control::SessionStatus;
 use gpui::{ElementId, EntityId, Pixels, Role, SharedString, Stateful};
-use ui::{ButtonLike, CommonAnimationExt, IconButton, Tab, TabPosition, Tooltip, prelude::*};
+use ui::{ButtonLike, CommonAnimationExt, IconButton, Tooltip, prelude::*};
 
 use crate::assets::PLUGIN_LAUNCHER_ICON_PATH;
 
@@ -136,15 +136,10 @@ impl RenderOnce for NewItemDragHandle {
 
 pub(crate) fn new_item_cell(button: impl IntoElement, cx: &App) -> AnyElement {
     h_flex()
-        // Zed's inner TabBar row derives its height from its tabs. Keep an
-        // empty strip at the same height instead of collapsing to the button.
-        .h(Tab::container_height(cx))
+        // Keep an empty bar at full height instead of collapsing to the button.
+        .h(px(PANE_BAR_HEIGHT))
         .flex_none()
-        // Collapse this divider onto the last tab's border.
-        .ml(px(-1.))
         .px(DynamicSpacing::Base04.rems(cx))
-        .border_l_1()
-        .border_color(cx.theme().colors().border)
         .child(button)
         .into_any_element()
 }
@@ -288,17 +283,6 @@ fn tab_label(
         })
 }
 
-/// Resolve the Zed border shape shared by pane-local tab strips.
-pub(crate) fn tab_position(index: usize, count: usize, active_index: Option<usize>) -> TabPosition {
-    if index == 0 {
-        TabPosition::First
-    } else if index + 1 == count {
-        TabPosition::Last
-    } else {
-        TabPosition::Middle(index.cmp(&active_index.unwrap_or(index)))
-    }
-}
-
 /// The common visual core for every workspace tab.
 ///
 /// Zed's selected [`Tab`] replaces one horizontal pixel of padding with a
@@ -379,40 +363,50 @@ impl<'a> ItemTab<'a> {
         self
     }
 
-    pub(crate) fn build(self, cx: &App) -> Tab {
+    /// Pane tab: fills its sorter slot, with a rounded fill for the selected
+    /// or hovered tab and no outline, in the same family as the strip's tabs.
+    pub(crate) fn build(self, cx: &App) -> Stateful<Div> {
         let colors = cx.theme().colors();
-        let background =
-            colors.background.blend(colors.tab_bar_background).blend(if self.selected {
-                colors.tab_active_background
-            } else {
-                colors.tab_inactive_background
-            });
-        // Other tabs take the shared hover tint; the current tab keeps the pane's color.
-        let hover_background = background.blend(crate::design::hover_tint(cx));
+        let surface = colors.editor_background;
+        let background = surface.blend(colors.text.opacity(crate::design::TINT_TAB_SELECTED));
+        let hover_background = surface.blend(colors.text.opacity(0.05));
         let selected = self.selected;
-        Tab::new(self.id)
-            .when(!selected, |tab| tab.hover(move |style| style.bg(hover_background)))
-            .fill_width()
+        h_flex()
+            .id(self.id)
+            .group("")
             .role(Role::Tab)
             .aria_label(self.aria_label)
-            .aria_selected(self.selected)
-            .toggle_state(self.selected)
-            .start_slot(item_indicator(
-                self.activity,
-                self.icon_path,
-                self.grouped,
-                self.space,
-                self.key,
-                cx,
+            .aria_selected(selected)
+            .w_full()
+            .h(crate::design::ICON_BUTTON)
+            .pl(DynamicSpacing::Base06.px(cx))
+            .pr(DynamicSpacing::Base04.px(cx))
+            .gap(DynamicSpacing::Base04.rems(cx))
+            .rounded(crate::design::RADIUS_CONTROL)
+            .when_else(
+                selected,
+                |tab| tab.bg(background),
+                |tab| tab.hover(move |style| style.bg(hover_background)),
+            )
+            .cursor_pointer()
+            .child(h_flex().flex_none().size(crate::design::STATUS_TILE).justify_center().child(
+                item_indicator(
+                    self.activity,
+                    self.icon_path,
+                    self.grouped,
+                    self.space,
+                    self.key,
+                    cx,
+                ),
             ))
             .child(tab_label(
                 self.title,
                 false,
-                Color::Default,
-                background,
+                if selected { Color::Default } else { Color::Muted },
+                if selected { background } else { surface },
                 if selected { background } else { hover_background },
                 self.close_slot,
-                self.selected,
+                selected,
             ))
     }
 

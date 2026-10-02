@@ -34,7 +34,7 @@ This is a summary of the customizations, not a complete commit-by-commit changel
 | --- | --- |
 | **Spaces and sidebar** | A quieter tree of spaces and layouts, revised selection and activity indicators, reordered rows, and **Scratch** for sessions outside a project. |
 | **Names and menus** | Custom pane-tab names, inline space/layout renaming, drag ordering, and revised context menus for moving and closing tabs. |
-| **Workspace appearance** | An inset work surface, softer Tabs / Spaces / Chats controls, revised spacing, icons, status markers, and native menu styling. |
+| **Workspace appearance** | An inset or full work surface, rounded pane tabs, a capsule Tabs / Spaces / Chats switch, revised spacing, icons, status markers, and native menu styling. |
 | **Tabs mode** | Reworked space-scoped outer tab strip, grouping, and creation controls. **Changed, but not properly tested end to end.** |
 | **Chats mode** | Changed history-row and terminal-pane presentation around Inbox and the session's original terminal. **Changed, but not properly tested end to end.** |
 | **Workspace recovery** | Autosave/restore preserves names, pane layouts, stable item IDs, and session recovery metadata. Confirmed missing sessions retain ended tabs instead of silently deleting them. |
@@ -59,7 +59,7 @@ restart, backend crash, agent resume, or every view transition works end to end.
 ## Screenshots
 
 These are **synthetic UI-lab captures**, not my live workspace. They render the
-current sidebar, tab strip, and menus in the `chartrx` theme with generic
+current sidebar, tab strip, and menus in the bundled Ayu Mirage theme with generic
 example data. The terminal text is static fixture text, and the macOS window
 frame is drawn by the capture harness. These images do not demonstrate a working
 terminal, or verified Tabs and Chats workflows.
@@ -71,6 +71,15 @@ terminal, or verified Tabs and Chats workflows.
 ### Tabs view
 
 ![Synthetic Chartr Daily Tabs view with every space in one tab strip](docs/assets/screenshots/tabs.png)
+
+### Full work surface
+
+The same views with the **Full** work surface, which runs edge to edge instead of
+sitting inset as a card.
+
+![Synthetic Chartr Daily Spaces view with the full work surface](docs/assets/screenshots/spaces-full.png)
+
+![Synthetic Chartr Daily Tabs view with the full work surface](docs/assets/screenshots/tabs-full.png)
 
 ### Inline layout naming
 

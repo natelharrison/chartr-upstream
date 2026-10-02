@@ -1,7 +1,7 @@
 //! A fixture-only visual harness for inspecting and publishing the production chrome.
 //!
 //! The lab never opens persistence or application configuration. It renders the
-//! real GPUI sidebar, tab strip, icons, fonts, and `chartrx` theme around static
+//! real GPUI sidebar, tab strip, icons, fonts, and Ayu Mirage theme around static
 //! fixture content directly to a Metal texture, so screenshots do not require
 //! macOS Screen Recording access. Each full-window capture then receives a macOS
 //! window frame; see [`frame_window`].
@@ -26,11 +26,13 @@ use crate::{
     chrome::{self, SpaceEntries},
     components::ContextMenu,
     fonts::{self, Fonts, UI_TEXT_DEFAULT},
-    settings,
+    settings::{self, WorkSurface},
     workspace::WorkspaceTabs,
 };
 
 const DEFAULT_OUTPUT: &str = "/private/tmp/chartr-ui-lab.png";
+/// The bundled theme the published screenshots use.
+const LAB_THEME: &str = "Ayu Mirage";
 
 /// The fixture window's logical size.
 const LAB_WIDTH: f32 = 1200.;
@@ -68,23 +70,27 @@ fn lab_pane_bar(cx: &App) -> impl IntoElement {
     ]
     .map(|(title, selected, status, icon)| {
         let key = items.alloc_item();
-        div().w(px(160.)).child(
+        // The app's sorter gives each pane tab a slot up to 200px wide.
+        div().w(px(200.)).child(
             chrome::ItemTab::new(("lab-pane-tab", key.get()), title, selected, "lab", key)
                 .activity(chrome::Activity { status, ..Default::default() })
                 .icon_path(icon.map(Into::into))
                 .build(cx),
         )
     });
-    ui::TabBar::new("lab-pane-bar").children(tabs).child(chrome::new_item_cell(
-        h_flex().gap(px(2.)).child(chrome::new_item_button("lab-new-item")).child(
-            ui::ButtonLike::new("lab-create").width(px(24.)).height(px(24.).into()).child(
-                Icon::from_path(assets::PLUGIN_LAUNCHER_ICON_PATH)
-                    .size(IconSize::Small)
-                    .color(Color::Muted),
+    chrome::pane_bar("lab-pane-bar", cx)
+        .pl(px(4.))
+        .child(h_flex().gap(px(2.)).children(tabs))
+        .child(chrome::new_item_cell(
+            h_flex().gap(px(2.)).child(chrome::new_item_button("lab-new-item")).child(
+                ui::ButtonLike::new("lab-create").width(px(24.)).height(px(24.).into()).child(
+                    Icon::from_path(assets::PLUGIN_LAUNCHER_ICON_PATH)
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                ),
             ),
-        ),
-        cx,
-    ))
+            cx,
+        ))
 }
 
 /// Static text in the selected terminal's place; the lab runs no shell.
@@ -197,7 +203,7 @@ pub fn capture(output: &Path) -> anyhow::Result<()> {
     let mut settings = settings::SettingsStore::bare();
     settings.update(|content| {
         content.appearance.get_or_insert_with(Default::default).fixed_theme =
-            Some(settings::CHARTRX_THEME.to_owned());
+            Some(LAB_THEME.to_owned());
     })?;
     cx.update(move |cx| {
         ::settings::init(cx);
@@ -221,6 +227,13 @@ pub fn capture(output: &Path) -> anyhow::Result<()> {
     save_framed(&mut cx, spaces, output)?;
     let tabs = open_lab(&mut cx, move |_, _| UiLab::new(ids, LabMode::Tabs))?;
     save_framed(&mut cx, tabs, &popup_output_path(output, "tabs"))?;
+    for (mode, suffix) in [(LabMode::Spaces, "full"), (LabMode::Tabs, "tabs-full")] {
+        let full = open_lab(&mut cx, move |_, _| UiLab {
+            surface: WorkSurface::Full,
+            ..UiLab::new(ids, mode)
+        })?;
+        save_framed(&mut cx, full, &popup_output_path(output, suffix))?;
+    }
 
     capture_drag(&mut cx, spaces, output)?;
     capture_inline_rename(&mut cx, ids, output)?;
@@ -503,6 +516,7 @@ enum LabMode {
 
 struct UiLab {
     mode: LabMode,
+    surface: WorkSurface,
     rename: Option<chrome::sidebar::RenameRows>,
     menu: Option<Entity<ui::ContextMenu>>,
     spaces: Vec<SpaceEntries>,
@@ -523,6 +537,7 @@ impl UiLab {
 
         Self {
             mode,
+            surface: WorkSurface::Inset,
             rename: None,
             menu: None,
             spaces: vec![
@@ -596,6 +611,7 @@ impl Render for UiLab {
         let colors = cx.theme().colors().clone();
         let emit: chrome::Emit = Rc::new(|_, _, _| {});
         let tabs = self.mode == LabMode::Tabs;
+        let full = self.surface == WorkSurface::Full;
         // The app counts blocked agents; each waiting fixture layout has one.
         let waiting = self
             .spaces
@@ -719,14 +735,18 @@ impl Render for UiLab {
                 window,
                 cx,
             );
+            // Inset leaves a gap below the strip; Full is flush.
+            let (height, gap) =
+                if full { (chrome::tabs::HEIGHT + 4., 0.) } else { (chrome::tabs::HEIGHT, 6.) };
             Some(
-                div().relative().w_full().h(px(chrome::tabs::HEIGHT + 6.)).flex_none().child(
+                div().relative().w_full().h(px(height + gap)).flex_none().child(
                     h_flex()
                         .absolute()
                         .top_0()
                         .left_0()
                         .w_full()
-                        .h(px(chrome::tabs::HEIGHT))
+                        .h(px(height))
+                        .when(full, |strip| strip.px(px(8.)))
                         .child(strip),
                 ),
             )
@@ -734,38 +754,45 @@ impl Render for UiLab {
             None
         };
 
-        // The inset work surface, styled as the app draws it.
+        // The work surface, styled as the app draws each setting.
         let surface = v_flex()
             .size_full()
             .min_h_0()
             .overflow_hidden()
-            .border_1()
-            .border_color(colors.border.opacity(0.72))
-            .rounded(crate::design::RADIUS_PANEL)
-            .shadow(vec![gpui::BoxShadow {
+            .border_color(colors.border.opacity(0.72));
+        let surface = if full {
+            // Full rounds only the corner that meets the sidebar.
+            surface.border_t_1().when(!tabs, |surface| surface.border_l_1().rounded_tl(rems(0.5)))
+        } else {
+            surface.border_1().rounded(crate::design::RADIUS_PANEL).shadow(vec![gpui::BoxShadow {
                 color: gpui::black().opacity(0.12),
                 offset: point(px(0.), px(12.)),
                 blur_radius: px(26.),
                 spread_radius: px(0.),
                 inset: false,
             }])
-            .child(
-                v_flex()
-                    .size_full()
-                    .bg(colors.editor_background)
-                    .child(lab_pane_bar(cx))
-                    .child(lab_terminal(cx)),
-            );
+        };
+        let surface = surface.child(
+            v_flex()
+                .size_full()
+                .bg(colors.editor_background)
+                .child(lab_pane_bar(cx))
+                .child(lab_terminal(cx)),
+        );
         let surface_frame = v_flex()
             .flex_1()
             .min_w_0()
             .h_full()
-            .pl(px(if tabs { 6. } else { 0. }))
-            .pr(px(6.))
-            .pb(px(6.))
+            .when(!full, |frame| frame.pl(px(if tabs { 6. } else { 0. })).pr(px(6.)).pb(px(6.)))
             .children(strip)
-            .child(div().relative().flex_1().min_h_0().w_full().child(surface).children(
-                crate::app::rounded_corner_masks(colors.background, colors.border.opacity(0.72)),
+            .child(div().relative().flex_1().min_h_0().w_full().child(surface).when(
+                !full,
+                |frame| {
+                    frame.children(crate::app::rounded_corner_masks(
+                        colors.background,
+                        colors.border.opacity(0.72),
+                    ))
+                },
             ));
 
         let scene = div()

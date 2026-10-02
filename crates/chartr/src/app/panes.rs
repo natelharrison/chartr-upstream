@@ -3,7 +3,6 @@
 use super::*;
 use crate::chrome::tab_sorter::{SortableTab, SortableTabList};
 use crate::components::SortAxis;
-use ui::TabBar;
 
 impl WorkspaceWindow {
     fn pane_new_item_button(
@@ -721,10 +720,12 @@ impl WorkspaceWindow {
         cx: &App,
     ) -> AnyElement {
         let close = weak.clone();
-        TabBar::new(format!("workspace-tab-{}-pane-{}-empty", tab_id.get(), pane_id.get()))
+        chrome::pane_bar(format!("workspace-tab-{}-pane-{}-empty", tab_id.get(), pane_id.get()), cx)
+            .pl(px(4.))
+            .pr(px(6.))
             .child(self.pane_new_item_cell(tab_id, pane_id, weak, cx))
             .child(div().h_full().flex_grow_1())
-            .end_child(
+            .child(
                 IconButton::new(
                     format!("close-empty-pane-{}-{}", tab_id.get(), pane_id.get()),
                     IconName::Close,
@@ -761,8 +762,6 @@ impl WorkspaceWindow {
             return div().into_any_element();
         };
 
-        let active_index =
-            pane.active().and_then(|active| pane.items().iter().position(|item| *item == active));
         let space_key = space.key();
         let middle_click_closes_tab = self.settings.resolved().middle_click_closes_tab;
         let tabs = pane
@@ -776,7 +775,6 @@ impl WorkspaceWindow {
                 let process_running = item.process_running();
                 let ended = item.ended();
                 let bell = item.as_session().is_some_and(crate::item::SessionItem::bell);
-                let position = chrome::tab_position(index, pane.items().len(), active_index);
                 let select = *id;
                 let close = *id;
                 let select_item = on.clone();
@@ -818,7 +816,6 @@ impl WorkspaceWindow {
                 .icon_path(item.icon_path())
                 .close_slot(Some(close_slot))
                 .build(cx)
-                .position(position)
                 .on_click(move |_, window, cx| {
                     select_item(Action::Select { space: None, item: select }, window, cx)
                 })
@@ -887,7 +884,7 @@ impl WorkspaceWindow {
                 .flex_shrink_1()
                 .overflow_x_scroll(),
             SortAxis::Horizontal,
-            gpui::rems(0.),
+            gpui::rems(2. / 14.),
             tabs,
             move |dragged, index, window, cx| {
                 let _ = sort_drop.update(cx, |this, cx| {
@@ -927,7 +924,8 @@ impl WorkspaceWindow {
                     );
                 });
             });
-        TabBar::new(format!("workspace-tab-{}-pane-{}-tabs", tab_id.get(), pane_id.get()))
+        chrome::pane_bar(format!("workspace-tab-{}-pane-{}-tabs", tab_id.get(), pane_id.get()), cx)
+            .pl(px(4.))
             .child(
                 sorted_tabs
                     .drag_lane(drag_lane, self.pane_new_item_cell(tab_id, pane_id, weak, cx)),

@@ -11,8 +11,9 @@ The rendered version, with pictures of every rule, is
 
 1. **Fewer values.** Pick from the tokens below. A new size, radius or color
    needs a reason and an update to this guide.
-2. **One pattern per job.** Pane tabs and content pickers use divided cells.
-   Workspace modes use soft inset choices: navigation, not pane content.
+2. **One pattern per job.** Pane tabs and strip tabs use rounded fills.
+   Content pickers use divided cells. Workspace modes use a capsule switch:
+   navigation, not pane content.
    Status is a colored glyph; a tinted tile marks states you must act on.
 3. **Color means something.** Chrome is neutral. Color appears only for state,
    hover, and brand glyphs.
@@ -29,6 +30,8 @@ in `agent_icons::icon_color`.
 | Surface | `colors.tab_active_background` / `editor_background` | Panes, selected divided cells |
 | Mode selection | `colors.element_selected` | Rounded selected workspace-mode choice |
 | Mode group / hover | `colors.text.opacity(TINT_MODE_GROUP)` / `colors.text.opacity(TINT_MODE_HOVER)` | Quiet neutral mode control |
+| Mode edge | `colors.text.opacity(TINT_MODE_EDGE)` | Hairline around the selected mode choice |
+| Pane tab | `colors.text.opacity(TINT_TAB_SELECTED)` / `colors.text.opacity(0.05)` | Selected / hovered pane tab, over `editor_background` |
 | Row fill | `colors.text.opacity(0.05)` | Hovered or menu-open unselected sidebar tab row |
 | Border | `colors.border` | Panels, cells, controls |
 | Border variant | `colors.border_variant` | Menus, quiet dividers |
@@ -49,8 +52,10 @@ Tints are opacity over the state color:
 pub(crate) const TINT_FILL: f32 = 0.16;   // status tile and chip fill
 pub(crate) const TINT_BORDER: f32 = 0.35; // chip border
 pub(crate) const TINT_HOVER: f32 = 0.13;  // pane/content hover fill (info blue)
-pub(crate) const TINT_MODE_GROUP: f32 = 0.035; // neutral mode group
+pub(crate) const TINT_MODE_GROUP: f32 = 0.06; // neutral mode track
 pub(crate) const TINT_MODE_HOVER: f32 = 0.05; // neutral mode-choice hover
+pub(crate) const TINT_MODE_EDGE: f32 = 0.1;   // selected mode-choice hairline
+pub(crate) const TINT_TAB_SELECTED: f32 = 0.08; // selected pane tab
 
 pub(crate) fn hover_tint(cx: &App) -> Hsla {
     cx.theme().status().info.opacity(TINT_HOVER)
@@ -106,9 +111,12 @@ pub(crate) const RADIUS_CONTROL: Pixels = px(6.); // rows, buttons, switches, in
 pub(crate) const RADIUS_SMALL: Pixels = px(4.);   // status tiles, inline rename, key hints, menu highlights
 ```
 
-- `rounded_full()` is only for status chips and drag pills.
-- Divided pane/content cells are square inside; only their outer group is rounded.
-- Workspace modes: outer radius 8 − inset 2 = inner choice radius 6. No dividers.
+- `rounded_full()` is only for status chips, drag pills and the workspace-mode
+  capsule.
+- Pane tabs round their fill with `RADIUS_CONTROL`, like the strip's tabs.
+- Divided content cells are square inside; only their outer group is rounded.
+- Workspace modes: a 28px capsule (radius 14) − inset 2 = a 24px capsule choice
+  (radius 12). No dividers.
 - The vendored context menu mirrors `RADIUS_MENU` in its own `MENU_RADIUS`.
 - Don't use 2, 12 or `rounded_lg`; map them to the nearest token.
 
@@ -117,7 +125,7 @@ pub(crate) const RADIUS_SMALL: Pixels = px(4.);   // status tiles, inline rename
 | Element | Height | Notes |
 |---|---|---|
 | Title bar | 40 | `title_bar::HEIGHT` |
-| Pane tab bar | 33 | `chrome::PANE_BAR_HEIGHT`, divided cells |
+| Pane tab bar | 33 | `chrome::PANE_BAR_HEIGHT`, 24px rounded tabs on the pane's surface |
 | Space row (sidebar) | 32 | `SPACE_ROW_HEIGHT` |
 | Tab row (sidebar) | 25 | `LAYOUT_ROW_HEIGHT` |
 | Menu item | 26 | Header 20, separator 7 |
@@ -153,38 +161,42 @@ ButtonLike::new("new-surface-menu-trigger")
 
 ## Tabs and switches
 
-Pane tabs, Inbox / Archive and settings pickers remain **divided cells**.
-The title-bar Tabs / Spaces / Chats switch uses **soft inset choices** instead,
-through the opt-in `SegmentedControl::soft_inset()` method. Its location and
-mode behavior stay unchanged; this is not a global segmented-control restyle.
+Inbox / Archive and settings pickers remain **divided cells**. Pane tabs use
+**rounded fills**, in the same family as the Tabs strip. The title-bar Tabs /
+Spaces / Chats switch is a **capsule**, through the opt-in
+`SegmentedControl::soft_inset()` method. Its location and mode behavior stay
+unchanged; this is not a global segmented-control restyle.
 
-Mode group: 28px high, neutral `text` tint at 0.035, 8px corners, no border.
-Each choice: 24px high, 8px horizontal padding, 12px regular text, 6px corners.
-Inset and gap are both 2px. The selected fill uses `element_selected`; hover
-on another choice uses neutral `text` at 0.05. Every selected corner stays
-rounded while the existing measured fill slides; reduced motion snaps.
+Mode group: 28px high, neutral `text` tint at 0.06, a capsule, no border.
+Each choice: 24px high, 10px horizontal padding, 12px regular text, a capsule.
+Inset and gap are both 2px. The selected fill uses `element_selected` with a
+1px `text` hairline at 0.1, so it reads as raised; hover on another choice uses
+neutral `text` at 0.05. The selected capsule keeps its shape while the existing
+measured fill slides; reduced motion snaps.
 
 ```rust
 // Only WorkspaceWindow::presentation_toggle and its UI-lab fixture opt in.
 SegmentedControl::new("Session list presentation", options).soft_inset()
-// Geometry comes from design::MODE_SWITCH_INSET, ICON_BUTTON,
-// RADIUS_MENU (outer), RADIUS_CONTROL (inner), TINT_MODE_GROUP / TINT_MODE_HOVER.
+// Geometry comes from design::MODE_SWITCH_INSET and ICON_BUTTON; both shapes are
+// capsules. Fills: TINT_MODE_GROUP / TINT_MODE_HOVER; edge: TINT_MODE_EDGE.
 ```
 
-The table below describes the unchanged divided pane/content controls:
+Pane tabs sit on a quiet bar (`chrome::pane_bar`) that shares the pane's
+surface, 2px apart, in equal slots up to 200px wide:
 
 | State | Look |
 |---|---|
-| Current | Surface color, no bottom border, so it joins the pane below. Primary text. |
-| Hover | `design::hover_tint` over the cell. Closable tabs show their close button. |
-| Other | Chrome color, muted text, 1px divider between cells. |
+| Current | `TINT_TAB_SELECTED` fill, 6px corners. Primary text. |
+| Hover | Neutral `text` at 0.05. Closable tabs show their close button. |
+| Other | No fill, muted text, no divider. |
 
 ```rust
-// Pane tabs (chrome::ItemTab::build): only unselected tabs take the hover tint.
-let hover_background = background.blend(crate::design::hover_tint(cx));
-Tab::new(id)
-    .when(!selected, |tab| tab.hover(move |style| style.bg(hover_background)))
-    .toggle_state(selected)
+// Pane tabs (chrome::ItemTab::build): a rounded fill, no outline.
+h_flex()
+    .w_full()
+    .h(crate::design::ICON_BUTTON)
+    .rounded(crate::design::RADIUS_CONTROL)
+    .when_else(selected, |tab| tab.bg(background), |tab| tab.hover(move |style| style.bg(hover)))
 
 // Default switches (components::SegmentedControl): fill slides between divided cells.
 h_flex()
@@ -299,5 +311,5 @@ rename keep the existing native dialog; no mode is switched just to rename.
 The same owner validation/error/persistence behavior remains in place.
 
 Tests: `sidebar_inline_rename_edits_in_place_and_routes_save_cancel_without_activation`
-and `soft_mode_picker_rounds_each_choice_without_changing_divided_controls`.
+and `soft_mode_picker_is_a_capsule_without_changing_divided_controls`.
 UI-lab captures include `-rename-tab.png` and `-rename-space.png`.

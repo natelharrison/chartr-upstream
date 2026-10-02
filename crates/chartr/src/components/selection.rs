@@ -175,7 +175,7 @@ impl RenderOnce for SegmentedControl {
             ButtonSize::Default.rems().to_pixels(window.rem_size()) - inset * 2.
         };
         let horizontal_padding = if soft_inset {
-            px(8.)
+            px(10.)
         } else {
             gpui::rems(if self.list_row { 0.625 } else { 0.75 }).to_pixels(window.rem_size())
                 - inset
@@ -204,6 +204,7 @@ impl RenderOnce for SegmentedControl {
             self.options.iter().find(|option| option.selected).map(|option| option.id.clone());
         let colors = cx.theme().colors();
         let border = colors.border.opacity(0.8);
+        let selected_edge = colors.text.opacity(crate::design::TINT_MODE_EDGE);
         let selected_background =
             if soft_inset { colors.element_selected } else { colors.tab_active_background };
         let hover_background = if soft_inset {
@@ -222,11 +223,11 @@ impl RenderOnce for SegmentedControl {
             .relative()
             .role(Role::RadioGroup)
             .aria_label(self.label)
-            .rounded(if soft_inset {
-                crate::design::RADIUS_MENU
-            } else {
-                crate::design::RADIUS_CONTROL
-            })
+            .when_else(
+                soft_inset,
+                |control| control.rounded_full(),
+                |control| control.rounded(crate::design::RADIUS_CONTROL),
+            )
             .overflow_hidden()
             .when(!soft_inset, |control| control.border_1().border_color(border))
             .bg(group_background)
@@ -251,7 +252,10 @@ impl RenderOnce for SegmentedControl {
                             pill.origin += bounds.origin;
                             let mut quad = gpui::fill(pill, selected_background);
                             if soft_inset {
-                                quad.corner_radii = crate::design::RADIUS_CONTROL.into();
+                                // A capsule with a hairline, so the choice reads as raised.
+                                quad.corner_radii = (pill.size.height / 2.).into();
+                                quad.border_widths = px(1.).into();
+                                quad.border_color = selected_edge;
                             }
                             window.paint_quad(quad);
                             if animating {
@@ -283,7 +287,7 @@ impl RenderOnce for SegmentedControl {
                     )
                     .px(horizontal_padding)
                     .when(!soft_inset && index > 0, |item| item.border_l_1().border_color(border))
-                    .when(soft_inset, |item| item.rounded(crate::design::RADIUS_CONTROL))
+                    .when(soft_inset, |item| item.rounded_full())
                     .when(hovered && !selected && !self.disabled, |item| item.bg(hover_background))
                     .when(self.full_width, |item| item.flex_1().min_w_0().justify_center())
                     .when(selected, |item| {
@@ -543,9 +547,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn soft_mode_picker_rounds_each_choice_without_changing_divided_controls(
-        cx: &mut TestAppContext,
-    ) {
+    fn soft_mode_picker_is_a_capsule_without_changing_divided_controls(cx: &mut TestAppContext) {
         cx.update(|cx| {
             ::settings::init(cx);
             theme::init(theme::LoadThemes::JustBase, cx);
@@ -573,14 +575,21 @@ mod tests {
                 let scale = window.scale_factor();
                 assert_eq!(group.bounds.size.height.as_f32() / scale, 28.);
                 assert_eq!(selected.bounds.size.height.as_f32() / scale, 24.);
-                assert_eq!(group.corner_radii.top_left.as_f32() / scale, 8.);
-                assert_eq!(selected.corner_radii.top_left.as_f32() / scale, 6.);
-                assert_eq!(selected.corner_radii.bottom_right.as_f32() / scale, 6.);
+                // Capsules: each radius is half its height, so the curves run parallel.
+                assert_eq!(group.corner_radii.top_left.as_f32() / scale, 14.);
+                assert_eq!(selected.corner_radii.top_left.as_f32() / scale, 12.);
+                assert_eq!(selected.corner_radii.bottom_right.as_f32() / scale, 12.);
+                // Only the selected choice has an edge: a hairline, not a divider.
+                let edge = colors.text.opacity(crate::design::TINT_MODE_EDGE);
+                assert_eq!(selected.border_widths.top.as_f32() / scale, 1.);
+                assert_eq!(selected.border_color, edge);
                 assert!(
-                    quads.iter().all(|q| q.border_widths.left.as_f32() == 0.
-                        && q.border_widths.right.as_f32() == 0.
-                        && q.border_widths.top.as_f32() == 0.
-                        && q.border_widths.bottom.as_f32() == 0.),
+                    quads.iter().filter(|q| !std::ptr::eq(*q, selected)).all(|q| {
+                        q.border_widths.left.as_f32() == 0.
+                            && q.border_widths.right.as_f32() == 0.
+                            && q.border_widths.top.as_f32() == 0.
+                            && q.border_widths.bottom.as_f32() == 0.
+                    }),
                     "no outer border or cell dividers"
                 );
                 let logical = |b: gpui::Bounds<gpui::ScaledPixels>| {
@@ -603,7 +612,7 @@ mod tests {
             let scale = window.scale_factor();
             let quads = window.painted_quads();
             let q = quads.iter().find(|q| q.background == hover.into()).expect("neutral hover");
-            assert_eq!(q.corner_radii.top_left.as_f32() / scale, 6.);
+            assert_eq!(q.corner_radii.top_left.as_f32() / scale, 12.);
         });
         cx.simulate_click(next, gpui::Modifiers::none());
         cx.run_until_parked();
